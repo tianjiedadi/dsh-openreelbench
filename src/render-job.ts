@@ -138,7 +138,19 @@ export async function composeProject(
   // projects whose platform only ever went through the model.
   const brief = await machine.readArtifact<Brief>(layout, 'brief')
   const platform = marker.target_platform ?? brief?.target_platform
-  const profile = resolveVideoProfile(platform, config.video.renderScale, config.video.fps)
+  const platformProfile = resolveVideoProfile(platform, config.video.renderScale, config.video.fps)
+  const visualProvider = marker.visual_provider ?? config.generation.visualProvider
+  const visualMode = marker.visual_mode ?? config.generation.visualMode
+  const customSize = visualProvider === 'api' ? marker.api_visual_sizes?.[visualMode] : undefined
+  const outputFrame = customSize === undefined ? platformProfile : customSize
+  const profile = customSize === undefined ? platformProfile : {
+    ...platformProfile,
+    width: outputFrame.width,
+    height: outputFrame.height,
+    source: 'default' as const,
+    shape: '自定义 ' + outputFrame.width + '×' + outputFrame.height,
+    label: '自定义 ' + outputFrame.width + '×' + outputFrame.height,
+  }
 
   const result = await renderProject({
     layout,
@@ -149,6 +161,7 @@ export async function composeProject(
     ...(request.burnSubtitles === undefined ? {} : { burnSubtitles: request.burnSubtitles }),
     ...(request.subtitleBackground === undefined ? {} : { subtitleBackground: request.subtitleBackground }),
     ...(platform === undefined ? {} : { targetPlatform: platform }),
+    outputFrame,
     ...(cut === undefined ? {} : { cut }),
     // Read off the project, never taken as a request argument: the bed is a
     // property of the film, and letting a render name a different one would

@@ -18,17 +18,18 @@
  */
 import { useMemo, useState } from 'react'
 
-import type { Config } from '../config.ts'
+import type { Config, GenerationApiKind } from '../config.ts'
+import { ModelPicker } from './model-picker.tsx'
+import type { ModelConnection } from './api.ts'
 import {
   type FieldPath,
   type FieldSpec,
   FIELD_GROUPS,
-  buildWrites,
   fieldKey,
   getPath,
   isOverridden,
 } from './fields.ts'
-import { type SettingsScope, useScope } from './scope.ts'
+import { type SettingsScope, type SettingsPathOp, useScope } from './scope.ts'
 
 import { tx, useT } from './i18n.ts'
 
@@ -112,7 +113,7 @@ export function SettingsSection({ scope }: SettingsSectionProps): JSX.Element | 
 
   // A namespace the host never registered should leave no trace in the UI,
   // rather than a dead card the user cannot act on.
-  if (snapshot.status === 'unavailable') return null
+  if (snapshot.status === 'unavailable') return <p className="orb-note orb-note-error">{tx('DSH 尚未提供本插件的配置。请重启 DSH 后重新打开本页。')}</p>
 
   const loading = snapshot.status === 'loading'
   const readOnly = loading || !snapshot.writable || saving
@@ -159,6 +160,7 @@ export function SettingsSection({ scope }: SettingsSectionProps): JSX.Element | 
       const sanitized = new Map<string, Edit>()
       for (const [key, edit] of edits) {
         const spec = specByKey.get(key)
+        if (spec?.kind === 'secret' && edit.value === '') continue
         if (spec?.kind === 'list' && Array.isArray(edit.value)) {
           const cleaned = (edit.value as string[]).map((entry) => entry.trim()).filter((entry) => entry !== '')
           sanitized.set(key, { path: edit.path, value: cleaned })
@@ -166,8 +168,13 @@ export function SettingsSection({ scope }: SettingsSectionProps): JSX.Element | 
           sanitized.set(key, edit)
         }
       }
-      for (const [field, value] of buildWrites(section, sanitized)) {
-        await scope.set(field, value)
+      // DSH redacts saved Key values. Updating only edited paths keeps those
+      // keys and the API settings of the other generation modes intact.
+      const ops: SettingsPathOp[] = [...sanitized.values()].map((edit) => ({
+        op: 'set', path: edit.path, value: edit.value,
+      }))
+      if (ops.length > 0 && !await scope.mutate(ops, snapshot.revision)) {
+        throw new Error(tx('DSH 未接受保存，配置可能已发生变化。请保留填写内容，刷新后再保存。'))
       }
       setEdits(new Map())
       setResult({ kind: 'ok', text: tx('已保存。项目根目录、绑定和风格立即生效；正在进行的合成沿用旧值。') })
@@ -194,6 +201,28 @@ export function SettingsSection({ scope }: SettingsSectionProps): JSX.Element | 
     const hint = spec.hint === undefined
       ? null
       : <div className={error === undefined ? 'orb-hint' : 'orb-hint orb-note-error'}>{error ?? tx(spec.hint)}</div>
+
+    if (spec.kind === 'model') {
+      const kind = spec.path[2] as GenerationApiKind
+      const connectionValue = (field: keyof ModelConnection): string => {
+        const path = ['generation', 'api', kind, field] as const
+        const entry = edits.get(fieldKey(path))
+        return toText(entry?.value ?? (field === 'apiKey' ? '' : getPath(section, path)))
+      }
+      const connection: ModelConnection = {
+        endpoint: connectionValue('endpoint'), modelsUrl: connectionValue('modelsUrl'),
+        apiKey: connectionValue('apiKey'), apiKeyEnv: connectionValue('apiKeyEnv'),
+        protocol: kind === 'voice' && connectionValue('protocol') === 'dashscope' ? 'dashscope' : 'openai',
+      }
+      const connectionDirty = Object.keys(connection).some((field) => edits.has(fieldKey(['generation', 'api', kind, field])))
+      return <div className="orb-field" key={key}>
+        {head}
+        <ModelPicker kind={kind} connection={connection} value={toText(edit?.value ?? stored)}
+          disabled={readOnly} enabled={!loading} autoLoad={!connectionDirty}
+          onChange={(value) => stage(spec, value)} />
+        {hint}
+      </div>
+    }
 
     if (spec.kind === 'boolean') {
       const checked = edit !== undefined ? edit.value === true : stored === true
@@ -294,18 +323,19 @@ export function SettingsSection({ scope }: SettingsSectionProps): JSX.Element | 
 
     const text = edit !== undefined
       ? (typeof edit.value === 'string' ? edit.value : toText(edit.value))
-      : toText(stored)
+      : spec.kind === 'secret' ? '' : toText(stored)
     return (
       <div className="orb-field" key={key}>
         {head}
         <input
           className={error === undefined ? 'orb-input' : 'orb-input orb-invalid'}
-          type="text"
+          type={spec.kind === 'secret' ? 'password' : 'text'}
           inputMode={spec.kind !== 'number' ? undefined : spec.decimal === true ? 'decimal' : 'numeric'}
           value={text}
           placeholder={spec.placeholder ?? ''}
           disabled={readOnly}
           spellCheck={false}
+          autoComplete={spec.kind === 'secret' ? 'new-password' : 'off'}
           onChange={(event) => stage(spec, event.target.value)}
         />
         {hint}

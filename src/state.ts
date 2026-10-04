@@ -21,6 +21,7 @@
  */
 import { join } from 'node:path'
 import { promises as fs } from 'node:fs'
+import { type GenerationSize, generationSizeError, videoSecondsError } from './generation-size.js'
 
 import {
   type ArtifactName,
@@ -240,6 +241,9 @@ export class StateMachine {
     style?: string
     pipeline?: string
     voice?: string
+    visualProvider?: 'comfyui' | 'api'
+    visualMode?: 'image' | 'video'
+    voiceProvider?: 'comfyui' | 'api'
   }): Promise<{ layout: ProjectLayout; marker: ProjectMarker; existed: boolean }> {
     const id = input.id ?? slugify(input.title)
     const layout = this.layout(id)
@@ -275,6 +279,11 @@ export class StateMachine {
     targetDurationSeconds?: number
     style?: string
     voice?: string
+    visualProvider?: 'comfyui' | 'api'
+    visualMode?: 'image' | 'video'
+    apiVisualSize?: { mode: 'image' | 'video'; size: GenerationSize | null }
+    apiVideoSeconds?: number | null
+    voiceProvider?: 'comfyui' | 'api'
     language?: string
     voiceDesignName?: string
     voiceDesignPrompt?: string
@@ -282,6 +291,9 @@ export class StateMachine {
     loraStrength?: number
     references?: string[]
     voiceReferences?: string[]
+    voiceReferencePaths?: string[]
+    apiVisualReferences?: { mode: 'image' | 'video'; value: import('./visual-references.js').VisualReferences }
+    novelImport?: import('./novel.js').NovelImportInfo
     music?: {
       path?: string; workflow?: string; prompt?: string
       gain_db?: number; fade_in?: number; fade_out?: number
@@ -292,6 +304,14 @@ export class StateMachine {
   }): Promise<ProjectMarker> {
     return this.serialize(projectId, async () => {
       const { layout, marker } = await this.requireProject(projectId)
+      if (patch.apiVisualSize !== undefined && patch.apiVisualSize.size !== null) {
+        const error = generationSizeError(patch.apiVisualSize.size)
+        if (error !== undefined) throw new StateViolationError('BAD_REQUEST', error)
+      }
+      if (patch.apiVideoSeconds !== undefined && patch.apiVideoSeconds !== null) {
+        const error = videoSecondsError(patch.apiVideoSeconds)
+        if (error !== undefined) throw new StateViolationError('BAD_REQUEST', error)
+      }
       const updated: ProjectMarker = {
         ...marker,
         ...(patch.title !== undefined ? { title: patch.title } : {}),
@@ -300,6 +320,9 @@ export class StateMachine {
           : {}),
         ...(patch.style !== undefined ? { style: patch.style } : {}),
         ...(patch.voice !== undefined ? { voice: patch.voice } : {}),
+        ...(patch.visualProvider !== undefined ? { visual_provider: patch.visualProvider } : {}),
+        ...(patch.visualMode !== undefined ? { visual_mode: patch.visualMode } : {}),
+        ...(patch.voiceProvider !== undefined ? { voice_provider: patch.voiceProvider } : {}),
         ...(patch.language !== undefined ? { language: patch.language } : {}),
         ...(patch.voiceDesignName !== undefined ? { voice_design_name: patch.voiceDesignName } : {}),
         ...(patch.voiceDesignPrompt !== undefined ? { voice_design_prompt: patch.voiceDesignPrompt } : {}),
@@ -307,6 +330,9 @@ export class StateMachine {
         ...(patch.loraStrength !== undefined ? { lora_strength: patch.loraStrength } : {}),
         ...(patch.references !== undefined ? { references: patch.references } : {}),
         ...(patch.voiceReferences !== undefined ? { voice_references: patch.voiceReferences } : {}),
+        ...(patch.voiceReferencePaths !== undefined ? { voice_reference_paths: patch.voiceReferencePaths } : {}),
+        ...(patch.novelImport !== undefined ? { novel_import: patch.novelImport } : {}),
+        ...(patch.apiVisualReferences !== undefined ? { api_visual_references: { ...marker.api_visual_references, [patch.apiVisualReferences.mode]: patch.apiVisualReferences.value } } : {}),
         // Merged, not replaced: the panel saves the workflow name long before
         // the file exists, and the agent writes the path without knowing what
         // was typed. A whole-object patch would make each erase the other.
@@ -314,6 +340,14 @@ export class StateMachine {
         ...(patch.targetPlatform !== undefined ? { target_platform: patch.targetPlatform } : {}),
         ...(patch.shotPlan !== undefined ? { shot_plan: patch.shotPlan } : {}),
       }
+      if (patch.apiVisualSize !== undefined) {
+        const sizes = { ...marker.api_visual_sizes }
+        if (patch.apiVisualSize.size === null) delete sizes[patch.apiVisualSize.mode]
+        else sizes[patch.apiVisualSize.mode] = { ...patch.apiVisualSize.size }
+        updated.api_visual_sizes = sizes
+      }
+      if (patch.apiVideoSeconds === null) delete updated.api_video_seconds
+      else if (patch.apiVideoSeconds !== undefined) updated.api_video_seconds = patch.apiVideoSeconds
       await writeMarker(layout, updated)
       return updated
     })

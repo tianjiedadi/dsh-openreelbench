@@ -28,6 +28,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
+import type { Config } from '../config.ts'
+import { type SettingsScope, useScope } from './scope.ts'
+import { ApiSettings } from './api-settings.tsx'
+
 import { type PluginState, api, bindingWorkflows } from './api.ts'
 import { type AgentPhase, BusyLabel } from './busy.tsx'
 import { IconMic, IconPlay, IconSpark } from './icons.tsx'
@@ -41,9 +45,11 @@ import { buildVoiceJob } from '../voice-job.js'
 import { buildScenePlanJob, buildVoiceDesignJob, buildVoiceProposalJob } from '../voice-extra-jobs.js'
 
 import { tx } from './i18n.ts'
+import { DASHSCOPE_SYSTEM_VOICES } from '../voice-catalog.ts'
 
 export interface AudioScreenProps {
   state: PluginState
+  settingsScope: SettingsScope<Config>
   onReload: () => Promise<void>
   onSend: (text: string) => Promise<void>
   onGoToStage: (stageId: string) => void
@@ -102,7 +108,7 @@ function signatureOf(state: PluginState): string {
     .join('|')
 }
 
-export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScreenProps): JSX.Element {
+export function AudioScreen({ state, settingsScope, onReload, onSend, onGoToStage }: AudioScreenProps): JSX.Element {
   const sections = useMemo(() => readSections(state), [state])
   const [activeId, setActiveId] = useState<string>(sections[0]?.id ?? '')
   const [voices, setVoices] = useState<string[]>([])
@@ -112,6 +118,7 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
   const [comfyUp, setComfyUp] = useState<boolean | null>(null)
   const [working, setWorking] = useState<string | null>(null)
   const [phase, setPhase] = useState<AgentPhase | null>(null)
+  const [apiReady, setApiReady] = useState(false)
   const [ttsPick, setTtsPick] = useState('')
   const [progress, setProgress] = useState(0)
   const [selection, setSelection] = useState<Selection | null>(null)
@@ -165,6 +172,10 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
   const designWorkflow = bindingWorkflows(state.bindings?.voice_design)[0] ?? ''
   const queryWorkflow = bindingWorkflows(state.bindings?.voice_query)[0] ?? ''
   const ttsWorkflow = ttsChoices.includes(ttsPick) ? ttsPick : (ttsChoices[0] ?? '')
+  const voiceProvider = state.project.voice_provider ?? state.providers?.voice ?? 'comfyui'
+  const settings = useScope(settingsScope)
+  const dashscope = voiceProvider === 'api' && settings.value?.generation?.api?.voice?.protocol === 'dashscope'
+  const cloneCache = settings.value?.generation?.api?.voice?.cloneCache !== false
   const stage = state.stages.find((entry) => entry.stage === 'assets_audio')
   const approved = stage?.status === 'completed' && stage.human_approved
   /**
@@ -198,10 +209,30 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
     (section) => section.path === undefined && section.text.trim() !== '')
 
   const voiceReferences = state.project.voice_references ?? []
-  const assetUrls = useAssetUrls()
+  const apiVoiceReferences = state.project.voice_reference_paths ?? []
+  const activeReferencePaths = voiceProvider === 'api' ? apiVoiceReferences : voiceReferences
+  const assetUrls = useAssetUrls(voiceProvider === 'comfyui')
   /** `input` is the fallback only: an uploaded clip and a generated one differ. */
   const referenceUrl = (name: string): string =>
-    pickedUrls.get(name) ?? assetUrls.get(name) ?? inputAssetUrl(name)
+    pickedUrls.get(name)
+      ?? assetUrls.get(name)
+      ?? (voiceProvider === 'api'
+        ? '/openreel/media?' + new URLSearchParams({ project: state.project.id, path: name }).toString()
+        : inputAssetUrl(name))
+  const referenceName = (path: string): string => path.split(/[\\/]/).pop() ?? path
+  const listProjectReferences = voiceProvider === 'api'
+    ? async (): Promise<AssetFile[]> => (await api.references(state.project.id)).files.map((file) => ({
+        ...file,
+        kind: 'audio' as const,
+        source: 'imported' as const,
+      }))
+    : undefined
+  const uploadProjectReference = voiceProvider === 'api'
+    ? async (file: File): Promise<AssetFile> => {
+        const uploaded = await api.uploadReference(state.project.id, file)
+        return { ...uploaded, kind: 'audio', source: 'imported' }
+      }
+    : undefined
 
   useEffect(() => {
     void comfy.available().then(setComfyUp)
@@ -344,7 +375,9 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
     setWorking('voice-reference')
     setResult(null)
     try {
-      await api.updateProject({ project: state.project.id, voice_references: [...next] })
+      await api.updateProject(voiceProvider === 'api'
+        ? { project: state.project.id, voice_reference_paths: [...next] }
+        : { project: state.project.id, voice_references: [...next] })
       await onReload()
       say('ok', note)
     } catch (error) {
@@ -356,14 +389,19 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
 
   async function addVoiceReference(file: AssetFile): Promise<void> {
     setPickerOpen(false)
-    setPickedUrls((previous) => new Map(previous).set(file.name, file.url))
-    if (voiceReferences.includes(file.name)) { say('error', tx('这段参考音频已经在列表里了。')); return }
-    await saveVoiceReferences([...voiceReferences, file.name], tx('加了一段参考音频：') + file.name)
+    const stored = voiceProvider === 'api' ? (file.path ?? file.name) : file.name
+    if (dashscope && activeReferencePaths.length >= 1) {
+      say('error', tx('百炼每次使用一段参考音频，请先移除现有参考音频再添加。'))
+      return
+    }
+    setPickedUrls((previous) => new Map(previous).set(stored, file.url).set(file.name, file.url))
+    if (activeReferencePaths.includes(stored)) { say('error', tx('这段参考音频已经在列表里了。')); return }
+    await saveVoiceReferences([...activeReferencePaths, stored], tx('加了一段参考音频：') + file.name)
   }
 
   async function removeVoiceReference(name: string): Promise<void> {
     if (playingRef === name) setPlayingRef(null)
-    await saveVoiceReferences(voiceReferences.filter((entry) => entry !== name), tx('去掉了一段参考音频'))
+    await saveVoiceReferences(activeReferencePaths.filter((entry) => entry !== name), tx('去掉了一段参考音频'))
   }
 
   /** Generate one section's narration and record it on the manifest. */
@@ -387,19 +425,17 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
    */
   async function generate(ids: readonly string[]): Promise<void> {
     if (working !== null || phase !== null) return
-    if (voice.trim() === '') {
+    if (voiceProvider === 'api' && !apiReady) {
+      say('error', tx('请先在本页的「语音 API 设置」填写并保存 API 地址和模型，再点击生成。'))
+      document.getElementById('orb-api-settings-voice')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (voiceProvider === 'comfyui' && voice.trim() === '') {
       say('error', tx('先选一个音色。整片配错音色等于整片重做。'))
       return
     }
-    if (ttsWorkflow.trim() === '') {
+    if (voiceProvider === 'comfyui' && ttsWorkflow.trim() === '') {
       say('error', tx('还没绑定配音工作流。去设置页的「ComfyUI 工作流绑定」里填上。'))
-      return
-    }
-    try {
-      // Catch a stale saved-parameter snapshot here, before spending a whole
-      // agent turn on a run that ComfyUI's own copy of the workflow will reject.
-    } catch (error) {
-      say('error', error instanceof ComfyError ? error.message : (error as Error).message)
       return
     }
     const wanted = ids
@@ -415,6 +451,20 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
     setPhase('sending')
     const before = signatureOf(state)
     try {
+      if (voiceProvider === 'api') {
+        await api.generate({
+          project: state.project.id,
+          kind: 'voice',
+          voice,
+          language: contentLanguage.id,
+          ...(activeReferencePaths.length === 0 ? {} : { voice_references: activeReferencePaths }),
+          items: wanted.map((section) => ({ section_id: section.id, text: section.text })),
+        })
+        await onReload()
+        setPhase(null)
+        say('ok', tx('API 配音回来了，逐段听一下。'))
+        return
+      }
       await onSend(buildVoiceJob({
         projectId: state.project.id,
         workflow: ttsWorkflow,
@@ -640,7 +690,12 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
         </span>
       </header>
 
-      {comfyUp === false ? (
+      {voiceProvider === 'api' ? (
+        <ApiSettings kind="voice" scope={settingsScope}
+          disabled={working !== null || phase !== null} onSaved={onReload} onReadyChange={setApiReady} />
+      ) : null}
+
+      {comfyUp === false && voiceProvider === 'comfyui' ? (
         <p className="orb-note orb-note-error">
           {tx('连不上 dsh-comfyui，这一页的生成功能都不可用。确认它已安装并启用。')}
         </p>
@@ -653,6 +708,22 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
           <span className="orb-card-meta">
             <span><b>{done}</b>/{sections.length}{tx(' 段已生成')}</span>
           </span>
+          <span className="orb-spacer" />
+          <label className="orb-inline-pick">
+            <span className="orb-hint">{tx('生成方式')}</span>
+            <select
+              className="orb-select orb-select-small"
+              value={voiceProvider}
+              disabled={working !== null || phase !== null}
+              onChange={(event) => {
+                const next = event.target.value === 'api' ? 'api' : 'comfyui'
+                void api.updateProject({ project: state.project.id, voice_provider: next }).then(onReload).catch((error) => say('error', (error as Error).message))
+              }}
+            >
+              <option value="comfyui">ComfyUI</option>
+              <option value="api">API 模型</option>
+            </select>
+          </label>
           <span className="orb-spacer" />
           {/* A REFERENCE for the request, not a switch on the workflow: which
               slot carries a language — or whether the workflow has one — is the
@@ -674,7 +745,9 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
             </select>
           </label>
           <span className="orb-spacer" />
-          {ttsChoices.length > 1 ? (
+          {voiceProvider === 'api' ? (
+            <span className="orb-hint">{tx('模型：')}{state.providers?.api.voice.model || tx('接口默认')}</span>
+          ) : ttsChoices.length > 1 ? (
             <label className="orb-inline-pick">
               <span className="orb-hint">{tx('工作流')}</span>
               <select
@@ -717,7 +790,8 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
                 {working === 'trim' ? tx('正在裁剪…')
                   : working === 'restore' ? tx('正在还原…')
                     : editNote !== null ? editNote.text
-                      : phase === null ? '' : tx('已交给 Agent，生成中会出现在对话里。')}
+                      : phase === null ? '' : voiceProvider === 'api'
+                        ? tx('语音 API 生成中…') : tx('已交给 Agent，生成中会出现在对话里。')}
               </span>
               <span className="orb-spacer" />
               {/* Rendered even with nothing to undo, disabled rather than
@@ -825,10 +899,15 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
           <IconMic className="orb-section-icon" />
           <h3 className="orb-card-title">{tx('音色')}</h3>
           <span className="orb-card-meta">
-            <span>{voices.length > 0 ? tx('音色库 ') + voices.length + tx(' 个') : comfyUp === true ? tx('读不到音色库') : ''}</span>
-            <span>{queryWorkflow === '' ? tx('试听需先绑定「音色查询」工作流') : tx('试听工作流 ') + queryWorkflow}</span>
+            <span>{voiceProvider === 'api'
+              ? tx('使用本页配置的语音 API 模型')
+              : voices.length > 0 ? tx('音色库 ') + voices.length + tx(' 个') : comfyUp === true ? tx('读不到音色库') : ''}</span>
+            <span>{voiceProvider === 'api'
+              ? tx('API 配音不需要 ComfyUI 工作流')
+              : queryWorkflow === '' ? tx('试听需先绑定「音色查询」工作流') : tx('试听工作流 ') + queryWorkflow}</span>
           </span>
           <span className="orb-spacer" />
+          {voiceProvider === 'comfyui' ? <>
           <button
             type="button"
             className="orb-btn orb-btn-small"
@@ -847,22 +926,38 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
           >
             {working === 'audition' ? <><Spinner />{tx('试听中…')}</> : tx('试听')}
           </button>
+          </> : null}
         </div>
         <div className="orb-card-body">
           <div className="orb-duo-split">
             <div className="orb-duo-col">
               <label className="orb-field">
-                <span className="orb-label">{tx('音色库')}</span>
-                <select
-                  className="orb-select"
-                  value={voice}
-                  disabled={working !== null}
-                  onChange={(event) => void saveVoice(event.target.value)}
-                >
-                  <option value="">{tx('（未选）')}</option>
-                  {voices.map((name) => <option key={name} value={name}>{name}</option>)}
-                </select>
+                <span className="orb-label">{voiceProvider === 'api' ? dashscope ? tx('百炼音色 / 复刻 ID') : tx('音色 ID（可选）') : tx('音色库')}</span>
+                {voiceProvider === 'api' ? (
+                  <input
+                    className="orb-input"
+                    value={voice}
+                    list={dashscope ? 'orb-dashscope-voices' : undefined}
+                    placeholder={dashscope ? tx('选择内置音色或粘贴复刻 ID；留空用 Cherry') : tx('按语音 API 填写；留空发送 default')}
+                    disabled={working !== null}
+                    onChange={(event) => setVoice(event.target.value)}
+                    onBlur={() => void saveVoice(voice)}
+                  />
+                ) : (
+                  <select
+                    className="orb-select"
+                    value={voice}
+                    disabled={working !== null}
+                    onChange={(event) => void saveVoice(event.target.value)}
+                  >
+                    <option value="">{tx('（未选）')}</option>
+                    {voices.map((name) => <option key={name} value={name}>{name}</option>)}
+                  </select>
+                )}
               </label>
+              {dashscope ? <datalist id="orb-dashscope-voices">
+                {DASHSCOPE_SYSTEM_VOICES.map((name) => <option value={name} key={name} />)}
+              </datalist> : null}
               {auditionUrl !== undefined ? <audio className="orb-audio" src={auditionUrl} controls autoPlay /> : null}
 
               {/* Reference audio lives here rather than in a panel of its own.
@@ -872,16 +967,16 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
               <div className="orb-subhead">
                 <span className="orb-subhead-label">{tx('参考音频')}</span>
                 <span className="orb-hint">
-                  {voiceReferences.length === 0
+                  {activeReferencePaths.length === 0
                     ? tx('声音克隆用，整个项目共用')
-                    : tx('整个项目共用 · ') + voiceReferences.length + tx(' 段')}
+                    : tx('整个项目共用 · ') + activeReferencePaths.length + tx(' 段')}
                 </span>
               </div>
 
               {/* Slots, like the reference images on the shots screen: position
                   matters, because a workflow's loaders take them in order. */}
               <div className="orb-slots">
-                {voiceReferences.map((name, index) => (
+                {activeReferencePaths.map((name, index) => (
                   <div className="orb-slot" key={name + index}>
                     <span className="orb-slot-index">{index + 1}</span>
                     <button
@@ -898,12 +993,14 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
                         onEnded={() => setPlayingRef(null)}
                         onError={() => {
                           setPlayingRef(null)
-                          say('error', tx('播放不了 ') + name + tx('。它可能已经不在 ComfyUI 的输入目录里了。'))
+                           say('error', tx('播放不了 ') + name + (voiceProvider === 'api'
+                             ? tx('。请重新上传这段参考音频。')
+                             : tx('。它可能已经不在 ComfyUI 的输入目录里了。')))
                         }}
                         hidden
                       />
                     ) : null}
-                    <span className="orb-slot-name" title={name}>{name}</span>
+                    <span className="orb-slot-name" title={name}>{referenceName(name)}</span>
                     <button
                       type="button"
                       className="orb-slot-x"
@@ -917,17 +1014,24 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
                   type="button"
                   className="orb-slot orb-slot-empty"
                   disabled={working !== null}
-                  title={tx('从 ComfyUI 的素材里指定一段；浏览器里也可以上传新的')}
+                   title={voiceProvider === 'api'
+                     ? tx('上传到当前项目，并随 API 请求发送')
+                     : tx('从 ComfyUI 的素材里指定一段；浏览器里也可以上传新的')}
                   onClick={() => setPickerOpen(true)}
                 >
-                  <span className="orb-slot-index">{voiceReferences.length + 1}</span>
+                  <span className="orb-slot-index">{activeReferencePaths.length + 1}</span>
                   <span className="orb-slot-add">{tx('指定参考音频')}</span>
                 </button>
               </div>
-              <p className="orb-hint">{tx('槽位按顺序对应工作流的加载参数。')}</p>
+              <p className="orb-hint">{voiceProvider === 'api'
+                ? dashscope ? cloneCache
+                  ? tx('首次生成会自动复刻音色并缓存；相同音频后续复用，不再重复上传复刻。每次保留一段参考音频。')
+                  : tx('已关闭缓存，每次生成会重新复刻音色。每次保留一段参考音频。')
+                  : tx('参考音频以 data URL / base64 随 API 请求发送，中转站需支持声音克隆输入。')
+                : tx('槽位按顺序对应工作流的加载参数。')}</p>
             </div>
 
-            <div className="orb-duo-col">
+            {voiceProvider === 'comfyui' ? <div className="orb-duo-col">
               <div className="orb-col-head">
                 <b>{tx('音色设计')}</b>
                 <span className="orb-hint">
@@ -976,7 +1080,12 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
                   }}
                 >{tx('创建音色')}</button>
               </div>
-            </div>
+            </div> : <div className="orb-duo-col">
+              <div className="orb-col-head"><b>{tx('API 配音')}</b></div>
+              <p className="orb-hint">{tx('API 地址、模型和 Key 在本页上方填写。保存后点击「生成这一段」或「补齐剩余」。')}</p>
+              <p className="orb-hint">{tx('音色 ID 是语音 API 的音色参数，与模型名称分别填写。参考音频用于支持声音克隆的模型。')}</p>
+              <p className="orb-hint">{tx('所有段落生成并试听后，点击「确认配音，进入配图」。')}</p>
+            </div>}
           </div>
         </div>
       </section>
@@ -984,6 +1093,8 @@ export function AudioScreen({ state, onReload, onSend, onGoToStage }: AudioScree
       {pickerOpen ? (
         <AssetPicker
           kinds={['audio']}
+          {...(listProjectReferences === undefined ? {} : { listFiles: listProjectReferences })}
+          {...(uploadProjectReference === undefined ? {} : { uploadFile: uploadProjectReference })}
           onPick={(file) => void addVoiceReference(file)}
           onClose={() => setPickerOpen(false)}
         />

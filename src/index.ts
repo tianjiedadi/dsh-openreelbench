@@ -1,13 +1,12 @@
 /**
  * dsh-openreelbench host entry.
  *
- * Host-only by design: MVP-0 has no web surface, so the package declares no
- * `dsh.client` and builds no client bundle. The UI face arrives at M2, when
- * the stage event stream is stable enough to project into a Conversation Node.
+ * The package ships this host entry together with its `dsh.client` browser
+ * entry; `dsh.bundle.patch` inserts the plugin into a profile's layer stack.
  *
  * The plugin owns a state machine over a workspace directory and three tools.
- * It does not talk to ComfyUI — generation is delegated to dsh-comfyui's tools,
- * driven by the model, using the workflow bindings in this plugin's config.
+ * ComfyUI generation is still delegated to dsh-comfyui's tools, while the
+ * optional model API provider is called by the media route in this plugin.
  * That keeps the two plugins coupled only through the model's tool calls, so
  * neither has to depend on the other's service.
  *
@@ -47,6 +46,17 @@ export const inject = ['tools']
 
 const OPENREEL_NS = 'openreel'
 
+/** dsh 0.2 exposes live volatile values through get(); older hosts pass plain values. */
+function unwrapConfig(value: unknown): unknown {
+  if (value !== null && typeof value === 'object') {
+    const candidate = value as { get?: unknown }
+    if (typeof candidate.get === 'function') return unwrapConfig((candidate.get as () => unknown)())
+    if (Array.isArray(value)) return value.map(unwrapConfig)
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, unwrapConfig(entry)]))
+  }
+  return value
+}
+
 interface SkillsService {
   register(skill: unknown): () => void
 }
@@ -57,8 +67,8 @@ export function apply(ctx: Context, config: Config): void {
    * this object, and a settings change assigns over it in place, so no caller
    * has to be told that the config moved.
    */
-  const resolved: Config = { ...config }
-  let source: () => Config = () => resolved
+  let source: () => Config = () => config
+  const readConfig = (): Config => unwrapConfig(source()) as Config
 
   /*
    * The host's own language, for the prose IT builds.
@@ -69,17 +79,17 @@ export function apply(ctx: Context, config: Config): void {
    * everything the panel renders from a constant table is translated there.
    * The director skills are untouched either way — see `src/i18n.ts`.
    */
-  if (isLanguage(resolved.language)) setHostLanguage(resolved.language)
+  if (isLanguage(readConfig().language)) setHostLanguage(readConfig().language)
 
   const machine = new StateMachine({
     // Both read on every call rather than being captured, so a settings change
     // to the project root or the ffprobe path takes effect without a restart.
-    workspaceRoot: () => resolveWorkspaceRoot(resolved.workspaceRoot),
-    probeDuration: (absolutePath: string) => probeDuration(resolved.ffprobePath, absolutePath),
+    workspaceRoot: () => resolveWorkspaceRoot(readConfig().workspaceRoot),
+    probeDuration: (absolutePath: string) => probeDuration(readConfig().ffprobePath, absolutePath),
   })
 
   const runtime: PluginRuntime = {
-    getConfig: () => resolved,
+    getConfig: readConfig,
     machine,
   }
 
@@ -133,8 +143,8 @@ export function apply(ctx: Context, config: Config): void {
       // One map per pipeline, one detail sheet per stage, and the craft skills
       // that several pipelines share. See `pipeline-skill.ts` for why those are
       // three lifetimes rather than one document.
-      ...buildPipelineSkills(resolved).map((skill) => skills.register(skill)),
-      ...buildStageSkills(resolved).map((skill) => skills.register(skill)),
+      ...buildPipelineSkills(readConfig()).map((skill) => skills.register(skill)),
+      ...buildStageSkills(readConfig()).map((skill) => skills.register(skill)),
       skills.register(OPENREEL_STORYTELLING_SKILL),
       skills.register(OPENREEL_CINEMATOGRAPHY_SKILL),
       skills.register(OPENREEL_REVIEWER_SKILL),
@@ -155,15 +165,31 @@ export function apply(ctx: Context, config: Config): void {
    * cordis.yml set and writes only the user's deltas on top.
    */
   ctx.inject(['settings'], (settingsCtx) => {
-    settingsCtx.settings.installSection(ctx, OPENREEL_NS, Config, config, {
-      setSource: (current) => {
-        source = current as () => Config
-      },
-      onChange: () => {
-        Object.assign(resolved, source())
-        if (isLanguage(resolved.language)) setHostLanguage(resolved.language)
-        mountSkills()
-      },
-    })
+    const settings = settingsCtx.settings as unknown as {
+      installSection?: (owner: Context, namespace: string, schema: unknown, base: unknown, hooks: {
+        setSource: (current: () => unknown) => void
+        onChange: () => void
+      }) => unknown
+      configure?: (presentation: { auto?: boolean }, owner?: unknown) => () => void
+    }
+    if (settings.installSection !== undefined) {
+      settings.installSection(ctx, OPENREEL_NS, Config, config, {
+        setSource: (current) => { source = current as () => Config },
+        onChange: () => {
+          if (isLanguage(readConfig().language)) setHostLanguage(readConfig().language)
+          mountSkills()
+        },
+      })
+    } else {
+      // dsh 0.2 derives settings forms from `.volatile()` schema fields.
+      // The custom page opts out of the generic auto-generated form.
+      const configure = settings.configure
+      if (configure !== undefined) {
+        settingsCtx.effect(
+          () => configure.call(settings, { auto: false }, settingsCtx.fiber),
+          'dsh-openreelbench: settings presentation',
+        )
+      }
+    }
   })
 }

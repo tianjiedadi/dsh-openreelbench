@@ -33,6 +33,7 @@ import { IconCheck, IconDoc, IconMic, IconPalette, IconPlay, IconSliders, IconSp
 import { buildBriefApprovedNote, buildBriefJob } from '../brief-job.js'
 
 import { tx } from './i18n.ts'
+import { NovelImport } from './novel-import.tsx'
 
 export interface ProjectScreenProps {
   state: PluginState
@@ -65,7 +66,7 @@ function draftFrom(state: PluginState): Draft {
       ?? (typeof brief.target_platform === 'string' ? brief.target_platform : 'generic'),
     hook: typeof brief.hook === 'string' ? brief.hook : '',
     keyPoints: Array.isArray(brief.key_points) ? brief.key_points.join('\n') : '',
-    audience: typeof brief.audience === 'string' ? brief.audience : '',
+    audience: typeof brief.target_audience === 'string' ? brief.target_audience : typeof brief.audience === 'string' ? brief.audience : '',
     tone: typeof brief.tone === 'string' ? brief.tone : '',
   }
 }
@@ -235,8 +236,8 @@ export function ProjectScreen({ state, onReload, onSend }: ProjectScreenProps): 
       target_duration_seconds: durationValue,
       style: draft.style,
       target_platform: draft.platform,
-      ...(draft.audience.trim() === '' ? {} : { audience: draft.audience.trim() }),
-      ...(draft.tone.trim() === '' ? {} : { tone: draft.tone.trim() }),
+      ...(draft.audience.trim() === '' ? {} : { target_audience: draft.audience.trim() }),
+      tone: draft.tone.trim() || '自然叙述',
     }
     try {
       // Marker first: the brief records the same title and duration, and a
@@ -256,9 +257,15 @@ export function ProjectScreen({ state, onReload, onSend }: ProjectScreenProps): 
         human_approved: true,
         note: tx('在OpenReel 创意台确认'),
       })
-      await onReload()
-      await onSend(buildBriefApprovedNote(state.project.id, brief.title ?? draft.title.trim()))
-      setSubmitNote({ kind: 'ok', text: tx('简报已通过，已通知 Agent 继续写脚本。') })
+      if (state.project.novel_import !== undefined) {
+        await api.applyNovel(state.project.id)
+        await onReload()
+        setSubmitNote({ kind: 'ok', text: tx('立项已确认，小说分段与分镜草稿已加载，请到脚本页审核。') })
+      } else {
+        await onReload()
+        await onSend(buildBriefApprovedNote(state.project.id, brief.title ?? draft.title.trim()))
+        setSubmitNote({ kind: 'ok', text: tx('简报已通过，已通知 Agent 继续写脚本。') })
+      }
     } catch (error) {
       setSubmitNote({ kind: 'error', text: (error as Error).message })
     } finally {
@@ -276,6 +283,9 @@ export function ProjectScreen({ state, onReload, onSend }: ProjectScreenProps): 
         </span>
       </header>
 
+      {!state.stages.some(s => s.stage === 'script' && s.status !== 'pending') ? <NovelImport project={state.project.id}
+        disabled={busy !== 'idle' || phase !== null} onImported={async () => { await onReload(); setDraft(draftFrom(await api.state(state.project.id))) }} /> : null}
+      {state.project.novel_import !== undefined ? <p className="orb-note">{tx('小说来源：')}{state.project.novel_import.name} · {state.project.novel_import.sections} {tx('段 / ')}{state.project.novel_import.shots} {tx('镜。确认立项后加载草稿。')}</p> : null}
       <section className="orb-card">
         <div className="orb-card-head">
           <IconSliders className="orb-section-icon" />
@@ -460,7 +470,8 @@ export function ProjectScreen({ state, onReload, onSend }: ProjectScreenProps): 
         <p className="orb-cta-hint">
           {approved
             ? tx('这一版已经确认过了。再提交会替换简报，后面所有阶段都要重做。')
-            : tx('这一页所有信息确认后的下一步——之后 Agent 才会开始写脚本。')}
+            : state.project.novel_import !== undefined ? tx('确认后加载小说分段与分镜草稿，到脚本页检查和调整。')
+              : tx('这一页所有信息确认后的下一步——之后 Agent 才会开始写脚本。')}
         </p>
         {submitNote !== null ? (
           <p className={'orb-note ' + (submitNote.kind === 'ok' ? 'orb-note-ok' : 'orb-note-error')}>{submitNote.text}</p>

@@ -7,6 +7,14 @@
  * it. What crosses the wire is JSON, and this file is where its shape lives.
  */
 
+import type { ApiModelsResult } from '../voice-catalog.ts'
+import type { GenerationApiKind, VoiceApiConfig } from '../config.ts'
+import type { GenerationSize } from '../generation-size.ts'
+import type { NovelOptions, NovelPreview, NovelImportInfo } from '../novel.ts'
+import type { VisualReferences } from '../visual-reference-types.ts'
+
+export type ModelConnection = Pick<VoiceApiConfig, 'endpoint' | 'modelsUrl' | 'apiKey' | 'apiKeyEnv' | 'protocol'>
+
 export interface ProjectMarker {
   id: string
   title: string
@@ -16,6 +24,11 @@ export interface ProjectMarker {
   target_duration_seconds: number
   /** Where the film is headed. Decides the output frame; see FRAME_GROUPS. */
   target_platform?: string
+  visual_provider?: 'comfyui' | 'api'
+  visual_mode?: 'image' | 'video'
+  api_visual_sizes?: Partial<Record<'image' | 'video', GenerationSize>>
+  api_video_seconds?: number
+  voice_provider?: 'comfyui' | 'api'
   /** What language this film is written and narrated in. Absent = follow the panel. */
   language?: string
   voice: string
@@ -28,6 +41,10 @@ export interface ProjectMarker {
   references?: string[]
   /** Reference AUDIO names in the same directory — voice cloning, project-wide. */
   voice_references?: string[]
+  /** Project-local reference audio paths used by API TTS providers. */
+  voice_reference_paths?: string[]
+  api_visual_references?: Partial<Record<'image' | 'video', VisualReferences>>
+  novel_import?: NovelImportInfo
   /** The background music bed: which workflow scored it, and where it landed. */
   music?: {
     path?: string; workflow?: string; prompt?: string
@@ -205,17 +222,24 @@ export interface PluginState {
   /** Saved edit versions, newest first. */
   cuts: Cut[]
   bindings: Record<string, { workflows?: string[]; workflow?: string; notes: string }>
+  providers: {
+    visual: 'comfyui' | 'api'
+    visual_mode: 'image' | 'video'
+    voice: 'comfyui' | 'api'
+    defaults: { visual: 'comfyui' | 'api'; visual_mode: 'image' | 'video'; voice: 'comfyui' | 'api' }
+    api: Record<'image' | 'video' | 'voice', { configured: boolean; model: string }>
+  }
   /**
    * The film's language, resolved host-side from the project's own choice and
    * the panel setting. The screens read THIS rather than resolving it again.
    */
   contentLanguage?: string
   /**
-   * The frame this project renders and generates at: the platform's baseline
+   * The final render frame: the platform's baseline
    * times the settings' render scale, resolved host-side.
    *
    * Served rather than worked out in the browser, because the shots screen has
-   * to ask for the SAME pixels compose will cut to. Optional for an older host,
+   * can display the output frame beside independent API generation dimensions. Optional for an older host,
    * where the screens fall back to the landscape baseline.
    */
   frame?: {
@@ -425,7 +449,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     ...init,
     // Only a body needs the header, and `exactOptionalPropertyTypes` will not
     // accept an explicit `undefined` for it — so it is spread in or left out.
-    ...(init?.body === undefined ? {} : { headers: { 'content-type': 'application/json' } }),
+    ...(init?.body === undefined ? {} : { headers: { 'content-type': 'application/json', ...init.headers } }),
   })
   const text = await response.text()
   let payload: unknown
@@ -499,18 +523,77 @@ export const api = {
     style?: string
     target_platform?: string
     voice?: string
+    visual_provider?: 'comfyui' | 'api'
+    visual_mode?: 'image' | 'video'
+    api_visual_size?: { mode: 'image' | 'video'; size: GenerationSize | null }
+    api_video_seconds?: number | null
+    voice_provider?: 'comfyui' | 'api'
     voice_design_name?: string
     voice_design_prompt?: string
     lora_name?: string
     lora_strength?: number
     references?: string[]
     voice_references?: string[]
+    voice_reference_paths?: string[]
+    api_visual_references?: { mode: 'image' | 'video'; value: VisualReferences }
     music?: {
       path?: string; workflow?: string; prompt?: string
       gain_db?: number; fade_in?: number; fade_out?: number
     }
   }): Promise<{ project: ProjectMarker }> =>
     request('/openreel/project', { method: 'POST', body: JSON.stringify(body) }),
+
+  models: (kind: GenerationApiKind, connection: ModelConnection, signal?: AbortSignal): Promise<ApiModelsResult> =>
+    request('/openreel/models', {
+      method: 'POST', body: JSON.stringify({ kind, connection }), ...(signal === undefined ? {} : { signal }),
+    }),
+
+  generate: (body: {
+    project: string
+    kind: 'visual' | 'voice'
+    mode?: 'image' | 'video'
+    frame?: { width: number; height: number }
+    voice?: string
+    language?: string
+    voice_references?: string[]
+    items: Array<{
+      section_id: string
+      shot_index?: number
+      text?: string
+      prompt?: string
+      seconds?: number
+    }>
+  }): Promise<{ accepted: number; assets: Array<{ id: string; path: string; type: string }> }> =>
+    request('/openreel/generate', { method: 'POST', body: JSON.stringify(body) }),
+
+  references: (project: string): Promise<{ files: Array<{ name: string; path: string; url: string }> }> =>
+    request('/openreel/references?project=' + encodeURIComponent(project)),
+
+  visualReferences: (project: string, kind: 'image' | 'video'): Promise<{ files: Array<{ name: string; path: string; url: string }> }> =>
+    request('/openreel/references?project=' + encodeURIComponent(project) + '&kind=' + kind),
+  uploadVisualReference: (project: string, kind: 'image' | 'video', file: File): Promise<{ name: string; path: string; url: string }> =>
+    request('/openreel/reference/file?project=' + encodeURIComponent(project) + '&kind=' + kind + '&name=' + encodeURIComponent(file.name), {
+      method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body: file,
+    }),
+  previewNovel: (body: { name: string; text: string; options: Partial<NovelOptions>; title?: string }): Promise<NovelPreview> =>
+    request('/openreel/novel/preview', { method: 'POST', body: JSON.stringify(body) }),
+  importNovel: (body: { name: string; text: string; options: Partial<NovelOptions>; title?: string; project?: string; style?: string; platform?: string }): Promise<{ project: string }> =>
+    request('/openreel/novel/import', { method: 'POST', body: JSON.stringify(body) }),
+  applyNovel: (project: string): Promise<{ project: string }> =>
+    request('/openreel/novel/apply', { method: 'POST', body: JSON.stringify({ project }) }),
+
+  uploadReference: async (project: string, file: File): Promise<{ name: string; path: string; url: string }> => {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    let binary = ''
+    const chunk = 0x8000
+    for (let index = 0; index < bytes.length; index += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(index, Math.min(index + chunk, bytes.length)))
+    }
+    return request('/openreel/reference', {
+      method: 'POST',
+      body: JSON.stringify({ project, kind: 'voice', name: file.name, data: btoa(binary) }),
+    })
+  },
 
   /**
    * Save one section's shots into the scene_plan artifact.

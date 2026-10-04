@@ -13,7 +13,8 @@
  * shorter stays a click. Without that, every card selection would jitter the
  * strip, and every pan would select whatever card it started on.
  */
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+
 import { tx } from './i18n.ts'
 
 export interface StripProps {

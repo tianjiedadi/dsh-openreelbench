@@ -1,6 +1,7 @@
 /**
  * Platform render profiles — what frame the film is cut to, and what size the
- * pictures are generated at.
+ * pictures are generated at by default. API inputs can override their size
+ * through project-local `api_visual_sizes` while compose uses this output frame.
  *
  * `brief.target_platform` used to be validated and then ignored: the schema
  * refused anything outside the list, and compose read width and height from the

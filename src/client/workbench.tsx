@@ -17,6 +17,9 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 
+import type { Config } from '../config.ts'
+import type { SettingsScope } from './scope.ts'
+
 import { type Catalog, type LibraryProject, type ScreenId, type PluginState, type TrashEntry, api } from './api.ts'
 import { ProjectScreen } from './project-screen.tsx'
 import { ShotsScreen } from './shots-screen.tsx'
@@ -34,10 +37,12 @@ export interface WorkbenchProps {
   send: (text: string) => Promise<void>
   /** Which session this panel belongs to; the key its memory is filed under. */
   sessionId: string
+  settingsScope: SettingsScope<Config>
 }
 
 interface ScreenProps {
   state: PluginState
+  settingsScope: SettingsScope<Config>
   onReload: () => Promise<void>
   onSend: (text: string) => Promise<void>
   onGoToStage: (stageId: string) => void
@@ -72,7 +77,7 @@ const SCREEN_TITLES: Record<ScreenId, string> = {
   timeline: tx('时间线'),
 }
 
-export function Workbench({ send, sessionId }: WorkbenchProps): JSX.Element {
+export function Workbench({ send, sessionId, settingsScope }: WorkbenchProps): JSX.Element {
   // Subscribe this tree to the language.
   //
   // `tx()` reads the store but does not subscribe, so one hook at each root is
@@ -273,6 +278,7 @@ export function Workbench({ send, sessionId }: WorkbenchProps): JSX.Element {
       {SCREENS[screen] !== undefined
         ? SCREENS[screen]!({
           state,
+          settingsScope,
           onReload: reload,
           onSend: send,
           onGoToStage: setActiveStage,

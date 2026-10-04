@@ -6,10 +6,8 @@
  * - Rendering settings (`video`, `pacing`, `ffmpegPath`) describe this machine
  *   and change rarely.
  * - `bindings` describes which ComfyUI workflow currently backs each
- *   generative capability. The plugin never calls ComfyUI itself; it hands
- *   these bindings to the model so the model can drive `comfyui_workflow`.
- *   Swapping a TTS or txt2img workflow is therefore a config edit, never a
- *   code change — that is the whole point of keeping it data.
+ *   generative capability. API endpoints live under `generation.api`; the
+ *   pages choose between the two providers per project.
  *
  * Nested object schemas deliberately carry no `.default({})`: schemastery
  * already fills an absent branch from its inner defaults and merges a partial
@@ -101,6 +99,49 @@ export interface VideoProfile {
   preset: string
 }
 
+export type GenerationProvider = 'comfyui' | 'api'
+export type VisualMode = 'image' | 'video'
+export type GenerationApiKind = 'image' | 'video' | 'voice'
+
+/** One HTTP generation endpoint. The response parser accepts common OpenAI-style shapes. */
+export interface ApiEndpointConfig {
+  endpoint: string
+  model: string
+  apiKey: string
+  apiKeyEnv: string
+  pollUrl: string
+  modelsUrl: string
+}
+
+export interface VoiceApiConfig extends ApiEndpointConfig {
+  protocol: 'openai' | 'dashscope'
+  cloneCache: boolean
+  instructions: string
+  /** Optional override for providers with a separate voice enrollment host. */
+  enrollmentEndpoint: string
+}
+
+export interface VisualApiConfig extends ApiEndpointConfig {
+  visualProtocol: 'auto' | 'json' | 'multipart' | 'kkrich' | 'xai'
+  referenceEndpoint: string
+  imageField: string
+  videoField: string
+  referenceEncoding: 'data-url' | 'base64'
+  generateAudio: boolean
+  resolution: '480p' | '720p'
+}
+
+export interface GenerationConfig {
+  visualProvider: GenerationProvider
+  visualMode: VisualMode
+  voiceProvider: GenerationProvider
+  api: {
+    image: VisualApiConfig
+    video: VisualApiConfig
+    voice: VoiceApiConfig
+  }
+}
+
 export interface Config {
   /**
    * The panel's language, and the default language of what gets generated.
@@ -122,6 +163,8 @@ export interface Config {
   /** Target length used when a request does not state one. */
   defaultDurationSeconds: number
   video: VideoProfile
+  /** Defaults used by the panels; a project can override these per run. */
+  generation: GenerationConfig
   /** The SRT is always a sidecar; burning it in costs a re-encode. */
   writeSubtitles: boolean
   subtitleFont: string
@@ -156,20 +199,54 @@ const binding = () => z.object({
     .description('给 Agent 的额外提示，会原样出现在技能里。参数细节不用写——那些它会去 comfyui_workflow 的清单里查。'),
 })
 
+const apiEndpointFields = () => ({
+  endpoint: z.string().default('').description('模型 API 的 HTTP 地址，例如 https://api.example.com/v1/images/generations。'),
+  model: z.string().default('').description('模型名称。'),
+  apiKey: z.string().default('').role('secret').description('API Key；建议留空并使用 API Key 环境变量。'),
+  apiKeyEnv: z.string().default('').description('读取 API Key 的环境变量名，例如 OPENAI_API_KEY。'),
+  pollUrl: z.string().default('').description('异步视频任务查询地址，可用 {id} 代入任务 id；只填 /v1、/videos 或 /video/generations 时自动补路径；同步返回 URL 时留空。'),
+  modelsUrl: z.string().default('')
+    .description('模型列表 GET 地址。留空从生成地址推导 /models；支持自定义中转站。'),
+})
+
+const apiEndpoint = () => z.object({
+  ...apiEndpointFields(),
+  visualProtocol: z.union(['auto', 'json', 'multipart', 'kkrich', 'xai'].map(v => z.const(v))).default('auto')
+    .description('自动：图片参考使用 images/edits 文件上传，视频参考使用 JSON；识别 KKRICH Seedance 和 xAI Grok Imagine。'),
+  referenceEndpoint: z.string().default('').description('图生图 / 参考视频生成地址，留空自动推导。'),
+  imageField: z.string().default('').description('参考图片字段名，留空使用协议默认字段。'),
+  videoField: z.string().default('').description('参考视频字段名，留空使用 reference_video。'),
+  referenceEncoding: z.union([z.const('data-url'), z.const('base64')]).default('data-url').description('通用 JSON 本地素材编码。'),
+  generateAudio: z.boolean().default(false).description('视频协议支持时生成模型音轨。'),
+  resolution: z.union([z.const('480p'), z.const('720p')]).default('720p').description('xAI Grok Imagine 视频分辨率；其他协议忽略。'),
+})
+
+const voiceEndpoint = () => z.object({
+  ...apiEndpointFields(),
+  protocol: z.union([z.const('openai'), z.const('dashscope')]).default('openai')
+    .description('语音协议：openai 使用完整兼容接口地址；dashscope 使用阿里云百炼原生接口。'),
+  cloneCache: z.boolean().default(true)
+    .description('百炼复刻音色缓存在当前项目；相同音频、模型、账号和服务复用音色。'),
+  instructions: z.string().default('')
+    .description('百炼指令控声，仅 qwen3-tts-instruct-flash 系列使用，例如：语速偏慢，沉稳温柔。'),
+  enrollmentEndpoint: z.string().default('')
+    .description('百炼声音复刻完整地址（可选）。留空使用所选地域的公共 customization 接口。'),
+})
+
 export const Config: z<Config> = z.object({
   // A union of constants, not a free string: every label has to exist in the
   // dictionary, and a value nothing translates would render as blank chrome.
   language: z.union(UI_LANGUAGES.map((id) => z.const(id))).default('zh')
     .description('界面语言 / Interface language。同时决定新项目的脚本与配音语种，'
-      + '可在配音页按项目改。不影响导演指令本身。'),
+      + '可在配音页按项目改。不影响导演指令本身。').volatile(),
   workspaceRoot: z.string().default('')
-    .description('项目根目录。留空 = $DSH_HOME/data/dsh-openreelbench/projects。成片、素材、状态都落在这里，建议放非系统盘。'),
+    .description('项目根目录。留空 = $DSH_HOME/data/dsh-openreelbench/projects。成片、素材、状态都落在这里，建议放非系统盘。').volatile(),
   ffmpegPath: z.string().default('ffmpeg')
-    .description('ffmpeg 可执行文件。在 PATH 上就填 ffmpeg，否则填绝对路径。'),
+    .description('ffmpeg 可执行文件。在 PATH 上就填 ffmpeg，否则填绝对路径。').volatile(),
   ffprobePath: z.string().default('ffprobe')
-    .description('ffprobe 可执行文件。用于实测配音时长——时间轴和字幕都按它的测量值排。'),
+    .description('ffprobe 可执行文件。用于实测配音时长——时间轴和字幕都按它的测量值排。').volatile(),
   defaultDurationSeconds: z.number().min(5).max(1800).default(30)
-    .description('默认成片时长（秒）。用户没说要多长时用这个值估算脚本字数。'),
+    .description('默认成片时长（秒）。用户没说要多长时用这个值估算脚本字数。').volatile(),
 
   video: z.object({
     renderScale: z.number().min(0.1).max(2).default(1)
@@ -181,13 +258,27 @@ export const Config: z<Config> = z.object({
     crf: z.number().min(0).max(51).default(20).description('画质。数字越小越清晰、文件越大；18–23 是常用区间。'),
     preset: z.string().default('medium').description('编码速度档。ultrafast/veryfast/medium/slow——越慢文件越小。'),
   }).description('编码参数。画幅由投放平台决定，这里只调它的倍率；'
-    + '画面观感（推近、裁切）和节奏（留白、单段时长）归风格库管，都不在这里。'),
+    + '画面观感（推近、裁切）和节奏（留白、单段时长）归风格库管，都不在这里。').volatile(),
+
+  generation: z.object({
+    visualProvider: z.union([z.const('comfyui'), z.const('api')]).default('comfyui')
+      .description('视觉生成默认提供方。项目页可按项目覆盖。'),
+    visualMode: z.union([z.const('image'), z.const('video')]).default('image')
+      .description('API 视觉生成默认输出图片或视频。'),
+    voiceProvider: z.union([z.const('comfyui'), z.const('api')]).default('comfyui')
+      .description('配音默认提供方。配音页可按项目覆盖。'),
+    api: z.object({
+      image: apiEndpoint().description('生图 API：文生图 / 图生图'),
+      video: apiEndpoint().description('生视频 API：文本 / 参考图 / 参考视频'),
+      voice: voiceEndpoint().description('语音合成 API；支持通用兼容接口与百炼原生千问 TTS。'),
+    }).description('外部生图、生视频和语音 API。响应支持常见的 url、data[0].url、b64_json、base64 格式。'),
+  }).description('生成提供方和模型 API 配置。ComfyUI 仍使用上面的工作流绑定。').volatile(),
 
   writeSubtitles: z.boolean().default(true)
-    .description('输出 .srt 字幕文件（与成片同名同目录）。字幕时间轴按实测配音排，不按脚本预估。'),
+    .description('输出 .srt 字幕文件（与成片同名同目录）。字幕时间轴按实测配音排，不按脚本预估。').volatile(),
   subtitleFont: z.string().default('')
     .description('烧录字幕的字体名，留空用「Microsoft YaHei」。'
-      + '字体必须装在本机——装不上时 libass 会静默换成别的字体，不会报错。'),
+      + '字体必须装在本机——装不上时 libass 会静默换成别的字体，不会报错。').volatile(),
 
   /**
    * Which ComfyUI workflow backs each capability. Empty until the workflow
@@ -200,7 +291,7 @@ export const Config: z<Config> = z.object({
     voice_design: binding().description('音色设计（可选，用于造新音色）'),
     voice_query: binding().description('音色查询（可选，输出所选音色的参考音频，用于试听）'),
     music: binding().description('配乐（可选，文生音乐。不绑定时合成页的配乐栏仍会显示手填过的名称）'),
-  }).description('每项生成能力用哪条 ComfyUI 工作流。只填名称，参数由 comfyui_workflow 的清单说了算。'),
+  }).description('每项生成能力用哪条 ComfyUI 工作流。只填名称，参数由 comfyui_workflow 的清单说了算。').volatile(),
 
   /**
    * Style. `defaultStyle` names one of the built-ins (clean-tech, warm-doc,
@@ -209,7 +300,7 @@ export const Config: z<Config> = z.object({
    * style is reported at load rather than silently dropping a palette.
    */
   defaultStyle: z.string().default(DEFAULT_STYLE)
-    .description('默认风格。内置 clean-tech（清晰科技）/ warm-doc（温暖纪实）/ flat-brief（扁平快讲），也可填下面自定义风格的 id。'),
+    .description('默认风格。内置 clean-tech（清晰科技）/ warm-doc（温暖纪实）/ flat-brief（扁平快讲），也可填下面自定义风格的 id。').volatile(),
   playbooks: z.dict(z.object({
     name: z.string().required(),
     mood: z.string().default(''),
@@ -240,8 +331,8 @@ export const Config: z<Config> = z.object({
   })).default({}).description(
     '自定义风格。键是风格 id（填进上面的「默认风格」或项目里）。'
     + '与内置同名会整套替换，不做逐字段合并——半覆盖的调色板正是画风漂移的来源。',
-  ),
+  ).volatile(),
 
   renderTimeoutMs: z.number().min(10_000).max(3_600_000).default(900_000)
-    .description('单次合成的超时上限（毫秒）。超过就中断，默认 15 分钟。'),
+    .description('单次合成的超时上限（毫秒）。超过就中断，默认 15 分钟。').volatile(),
 }) as unknown as z<Config>

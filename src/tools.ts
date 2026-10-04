@@ -99,6 +99,7 @@ function pathsOf(layout: ProjectLayout): Record<string, string> {
   return {
     project: layout.dir,
     images: layout.imagesDir,
+    videos: layout.videosDir,
     audio: layout.audioDir,
     output: layout.outputDir,
   }

@@ -282,7 +282,8 @@ const CSS = `
 }
 /* Contain, pinned to the bottom: a landscape still rests on the timeline
    with its spare space above; a portrait one climbs to the top edge first. */
-.orb-shot-image img {
+.orb-shot-image img,
+.orb-shot-image video {
   width: 100%; height: 100%; object-fit: contain; object-position: center bottom; display: block;
 }
 .orb-shot-empty { font-size: 12px; color: var(--dsw-alias-label-tertiary); }
@@ -1191,7 +1192,8 @@ body.orb-dragging { user-select: none; cursor: grabbing; }
   border: 1px solid var(--dsw-alias-border-l2);
   background: var(--dsw-alias-bg-layer-2);
 }
-.orb-shot-card img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.orb-shot-card img,
+.orb-shot-card video { width: 100%; height: 100%; object-fit: cover; display: block; }
 .orb-shot-card-current { border-color: var(--dsw-alias-brand-primary); border-width: 2px; }
 .orb-shot-card-empty { border-style: dashed; }
 /* A shot holding the screen longer than the style advises. */

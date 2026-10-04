@@ -57,6 +57,42 @@ const CSS = `
 .orb-row { display: flex; gap: 10px; }
 .orb-row > * { flex: 1; min-width: 0; }
 
+.orb-api-settings-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px;
+}
+.orb-api-settings .orb-actions { flex-wrap: wrap; }
+.orb-api-settings .orb-card-body > .orb-hint { margin-top: 0; }
+.orb-novel-scroll { max-height: 320px; overflow: auto; overflow-wrap: anywhere; }
+.orb-novel-import .orb-card-body { display: grid; gap: 12px; }
+.orb-reference-url { display: flex; flex-wrap: wrap; gap: 8px; }
+.orb-reference-url .orb-input { flex: 1; min-width: 180px; }
+.orb-file-button { display: inline-flex; align-items: center; cursor: pointer; }
+.orb-file-button input { display: none; }
+.orb-reference-advanced { display: grid; gap: 8px; }
+.orb-reference-advanced > summary { cursor: pointer; color: var(--dsw-alias-label-tertiary); font-size: 12px; }
+.orb-api-reference-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.orb-api-reference-item { display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px; min-width: 0; }
+.orb-api-reference-item img, .orb-api-reference-item video { width: 100%; height: 120px; object-fit: contain; background: #111; border-radius: 6px; }
+.orb-reference-name { overflow-wrap: anywhere; font-size: 12px; }
+.orb-model-picker { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.orb-model-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.orb-model-controls > .orb-input, .orb-model-controls > .orb-select { flex: 1; min-width: min(160px, 100%); }
+.orb-model-options { display: flex; flex-wrap: wrap; gap: 12px; }
+.orb-model-picker .orb-note { overflow-wrap: anywhere; }
+.orb-visual-size-settings {
+  display: flex; flex-direction: column; gap: 10px; padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1); border-radius: 8px;
+}
+.orb-visual-size-heading { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.orb-visual-size-settings p { margin: 0; }
+.orb-visual-size-dimensions { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
+.orb-visual-size-dimensions .orb-field { flex: 1; min-width: 80px; }
+.orb-visual-size-dimensions > .orb-hint { padding-bottom: 7px; }
+.orb-shots-generation-head { flex-wrap: wrap; }
+.orb-shots-generation-head .orb-inline-pick { flex: none; }
+.orb-shots-generation-head .orb-card-title { flex: none; }
+.orb-shots-generation-head .orb-select-small { min-width: 100px; }
+
 .orb-check { display: flex; align-items: center; gap: 8px; }
 .orb-check input { margin: 0; }
 

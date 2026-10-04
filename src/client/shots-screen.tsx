@@ -21,6 +21,13 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 
+import type { Config } from '../config.ts'
+import type { SettingsScope } from './scope.ts'
+import { ApiSettings } from './api-settings.tsx'
+import { VisualSizeSettings } from './visual-size-settings.tsx'
+import { VisualReferenceSettings } from './visual-reference-settings.tsx'
+import { resolveGenerationSize } from '../generation-size.ts'
+
 import { SHOT_LANGUAGE_FIELDS, type PluginState, api, bindingWorkflows } from './api.ts'
 import { type AgentPhase, BusyLabel } from './busy.tsx'
 import { IconImage, IconPlay, IconSliders } from './icons.tsx'
@@ -33,6 +40,7 @@ import { tx } from './i18n.ts'
 
 export interface ShotsScreenProps {
   state: PluginState
+  settingsScope: SettingsScope<Config>
   onReload: () => Promise<void>
   onSend: (text: string) => Promise<void>
   onGoToStage: (stageId: string) => void
@@ -64,6 +72,7 @@ interface Shot {
   /** Undefined until the picture exists. */
   assetId?: string
   path?: string
+  mediaType: 'image' | 'video'
 }
 
 interface RawAsset {
@@ -74,6 +83,7 @@ interface RawAsset {
   prompt?: string
   shot_index?: number
   weight?: number
+  source_tool?: string
 }
 
 /**
@@ -131,6 +141,7 @@ function buildShots(state: PluginState): Shot[] {
         duration: slot.duration,
         weight: slot.weight,
         text: typeof section?.text === 'string' ? section.text : '',
+        mediaType: asset?.type === 'video' ? 'video' : 'image',
         // A shot with no picture yet inherits the script's prompt as its seed;
         // the script wrote one visual idea per section, and the first shot is
         // the one that idea belongs to.
@@ -157,18 +168,20 @@ function buildShots(state: PluginState): Shot[] {
 function rewriteSection(
   state: PluginState,
   sectionId: string,
-  shots: ReadonlyArray<Pick<Shot, 'prompt' | 'weight' | 'assetId' | 'path'>>,
+  shots: ReadonlyArray<Pick<Shot, 'prompt' | 'weight' | 'assetId' | 'path'> & { mediaType?: 'image' | 'video' }>,
 ): Record<string, unknown> {
   const manifest = state.artifacts.asset_manifest_shots as { assets?: RawAsset[] } | undefined
   const others = (manifest?.assets ?? []).filter((asset) => asset.scene_id !== sectionId)
   const mine = shots
     .map((shot, index) => {
       if (shot.assetId === undefined || shot.path === undefined) return undefined
+      const original = manifest?.assets?.find((asset) => asset.id === shot.assetId)
       return {
+        ...original,
         id: shot.assetId,
-        type: 'image',
+        type: shot.mediaType ?? (original?.type === 'video' ? 'video' : 'image'),
         path: shot.path,
-        source_tool: 'comfyui_workflow',
+        source_tool: original?.source_tool ?? ((state.project.visual_provider ?? state.providers?.visual) === 'api' ? 'model_api' : 'comfyui_workflow'),
         scene_id: sectionId,
         shot_index: index,
         weight: shot.weight,
@@ -179,7 +192,7 @@ function rewriteSection(
   return { version: '1.0', assets: [...others, ...mine] }
 }
 
-export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScreenProps): JSX.Element {
+export function ShotsScreen({ state, settingsScope, onReload, onSend, onGoToStage }: ShotsScreenProps): JSX.Element {
   const shots = useMemo(() => buildShots(state), [state])
   const [activeKey, setActiveKey] = useState<string | null>(null)
   /**
@@ -190,6 +203,9 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
    * the first render can follow the report, and a later toggle sticks.
    */
   const [phase, setPhase] = useState<AgentPhase | null>(null)
+  const [apiReady, setApiReady] = useState(false)
+  const [sizeReady, setSizeReady] = useState(true)
+  const [referencesReady, setReferencesReady] = useState(true)
   const [busy, setBusy] = useState<string | null>(null)
   const [draftPrompt, setDraftPrompt] = useState<string | null>(null)
   const [imagePick, setImagePick] = useState('')
@@ -203,17 +219,20 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
 
   const imageChoices = bindingWorkflows(state.bindings?.image)
   const imageWorkflow = imageChoices.includes(imagePick) ? imagePick : (imageChoices[0] ?? '')
+  const visualProvider = state.project.visual_provider ?? state.providers?.visual ?? 'comfyui'
+  const visualMode = state.project.visual_mode ?? state.providers?.visual_mode ?? 'image'
   const stage = state.stages.find((entry) => entry.stage === 'assets_shots')
   const approved = stage?.status === 'completed' && stage.human_approved
   const playbook = state.style.playbook
   /**
-   * The frame every picture has to come back at.
+   * The final render frame. API inputs can use another model-supported size.
    *
    * Resolved host-side from the platform's baseline and the render scale, and
    * read straight off the state — the same object compose reads. The fallback
    * is the landscape baseline, for a host too old to send it.
    */
   const frame = state.frame ?? { width: 1920, height: 1080, shape: tx('横屏 16:9'), scale: 1 }
+  const generationSize = visualProvider === 'api' ? resolveGenerationSize(state.project.api_visual_sizes?.[visualMode], frame) : frame
   const total = state.timeline.reduce((sum, timing) => sum + timing.duration, 0)
   const done = shots.filter((shot) => shot.path !== undefined).length
 
@@ -222,7 +241,8 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
 
   // Learn every asset's real URL once, so a reference saved in an earlier
   // session still shows a thumbnail rather than a guessed path.
-  const assetUrls = useAssetUrls()
+  const assetUrls = useAssetUrls(visualProvider === 'comfyui')
+  useEffect(() => { if (visualProvider !== 'comfyui') setPickerOpen(false) }, [visualProvider])
   useEffect(() => {
     setLoraHint(state.project.lora_name ?? '')
     setLoraOn((state.project.lora_strength ?? 0) === 1)
@@ -373,12 +393,48 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
   /** Watch the manifest until the agent's pictures land. */
   async function generate(list: readonly Shot[]): Promise<void> {
     if (phase !== null || busy !== null) return
-    if (imageWorkflow === '') { say('error', tx('还没绑定配图工作流。去设置页的「ComfyUI 工作流绑定」里填上。')); return }
+    if (visualProvider === 'api' && !referencesReady) {
+      say('error', tx('请添加参考素材，或清空未添加的地址，再点击生成。'))
+      document.getElementById('orb-api-reference-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (visualProvider === 'api' && !sizeReady) {
+      say('error', tx('请先保存或撤销生成尺寸和时长的修改，再点击生成。'))
+      document.getElementById('orb-api-visual-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (visualProvider === 'api' && !apiReady) {
+      say('error', tx('请先在本页的 API 设置填写并保存 API 地址和模型，再点击生成。'))
+      document.getElementById('orb-api-settings-' + visualMode)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      return
+    }
+    if (visualProvider === 'comfyui' && imageWorkflow === '') { say('error', tx('还没绑定配图工作流。去设置页的「ComfyUI 工作流绑定」里填上。')); return }
     if (list.length === 0) return
     setResult(null)
     setPhase('sending')
     const before = JSON.stringify(state.artifacts.asset_manifest_shots ?? null)
     try {
+      if (visualProvider === 'api') {
+        await api.generate({
+          project: state.project.id,
+          kind: 'visual',
+          mode: visualMode,
+          frame: { width: generationSize.width, height: generationSize.height },
+          items: list.map((shot) => {
+            const built = promptFor(shot)
+            return {
+              section_id: shot.sectionId,
+              shot_index: shot.index,
+              seconds: visualMode === 'video' ? state.project.api_video_seconds ?? shot.duration : shot.duration,
+              prompt: (built?.prompt ?? shot.prompt).trim(),
+            }
+          }),
+        })
+        await onReload()
+        setPhase(null)
+        say('ok', visualMode === 'video' ? tx('API 视频回来了，逐镜看一下。') : tx('API 图片回来了，逐张看一下。'))
+        return
+      }
       await onSend(jobFor(list))
       setPhase('generating')
       for (let attempt = 0; attempt < 240; attempt += 1) {
@@ -690,30 +746,63 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
         </span>
       </header>
 
+      {visualProvider === 'api' ? (
+        <ApiSettings key={visualMode} kind={visualMode} scope={settingsScope}
+          disabled={phase !== null || busy !== null} onSaved={onReload} onReadyChange={setApiReady} />
+      ) : null}
+
       {result !== null ? (
         <p className={'orb-note ' + (result.kind === 'ok' ? 'orb-note-ok' : 'orb-note-error')}>{result.text}</p>
       ) : null}
 
       <section className="orb-card">
-        <div className="orb-card-head">
+        <div className="orb-card-head orb-shots-generation-head">
           <IconImage className="orb-section-icon" />
           <h3 className="orb-card-title">{tx('分镜生成')}</h3>
           <span className="orb-card-meta">
-            {/* The frame belongs on this card: it is what the button is about
-                to ask for, and the one number whose being wrong is invisible
-                until the pictures come back the wrong shape. */}
             <span>
-              <b>{done}</b>/{shots.length}{tx(' 镜已生成 · 全片 ')}{total.toFixed(1)}{tx(' 秒')} ·{' '}
-              <b title={tx('画幅由立项页的投放平台决定，尺寸再乘设置里的生成系数 ') + frame.scale}>
-                {frame.width}×{frame.height}
-              </b>
+              <b>{done}</b>/{shots.length}{tx(' 镜已生成 · 全片 ')}{total.toFixed(1)}{tx(' 秒')}
             </span>
+            <span>{tx('生成：')}<b>{generationSize.width}×{generationSize.height}</b></span>
+            {visualProvider === 'api' ? <span>{tx('成片：')}{frame.width}×{frame.height}</span> : null}
           </span>
           <span className="orb-spacer" />
+          <label className="orb-inline-pick">
+            <span className="orb-hint">{tx('生成方式')}</span>
+            <select
+              className="orb-select orb-select-small"
+              value={visualProvider}
+              disabled={phase !== null || busy !== null || (visualProvider === 'api' && !sizeReady)}
+              onChange={(event) => {
+                const next = event.target.value === 'api' ? 'api' : 'comfyui'
+                void api.updateProject({ project: state.project.id, visual_provider: next }).then(onReload).catch((error) => say('error', (error as Error).message))
+              }}
+            >
+              <option value="comfyui">ComfyUI</option>
+              <option value="api">API 模型</option>
+            </select>
+          </label>
+          {visualProvider === 'api' ? (
+            <label className="orb-inline-pick">
+              <span className="orb-hint">{tx('媒体')}</span>
+              <select
+                className="orb-select orb-select-small"
+                value={visualMode}
+                disabled={phase !== null || busy !== null || !sizeReady}
+                onChange={(event) => {
+                  const next = event.target.value === 'video' ? 'video' : 'image'
+                  void api.updateProject({ project: state.project.id, visual_mode: next }).then(onReload).catch((error) => say('error', (error as Error).message))
+                }}
+              >
+                <option value="image">图片</option>
+                <option value="video">视频</option>
+              </select>
+            </label>
+          ) : null}
           {/* Always a dropdown, even with one candidate: a read-only name looks
               like a label, and a select says "this is a choice you own" — plus
               an unbound capability shows where to fix it instead of a blank. */}
-          <label className="orb-inline-pick">
+          {visualProvider === 'comfyui' ? <label className="orb-inline-pick">
             <span className="orb-hint">{tx('工作流')}</span>
             <select
               className="orb-select orb-select-small"
@@ -730,9 +819,17 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
                 <option key={name} value={name}>{index === 0 ? name + tx('（默认）') : name}</option>
               ))}
             </select>
-          </label>
+          </label> : null}
         </div>
         <div className="orb-card-body">
+          {visualProvider === 'api' ? <VisualSizeSettings key={state.project.id + ':' + visualMode}
+            project={state.project} mode={visualMode} outputFrame={frame} disabled={phase !== null || busy !== null}
+            onSaved={onReload} onReadyChange={setSizeReady}
+            onBusyChange={(working) => setBusy(working ? 'api-visual-settings' : null)} /> : null}
+          {visualProvider === 'api' ? <VisualReferenceSettings key={'references:' + state.project.id + ':' + visualMode}
+            project={state.project} mode={visualMode} disabled={phase !== null || busy !== null}
+            onSaved={onReload} onReadyChange={setReferencesReady}
+            onBusyChange={working => setBusy(working ? 'api-reference-settings' : null)} /> : null}
           {/* One shell for both quality checks, shared with the compose screen.
               Always rendered: an empty screen cannot tell you that anything was
               checked, so a pass costs one collapsed line and a finding opens. */}
@@ -776,7 +873,9 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
                 <div className="orb-shot-image">
                   {imageSrc === undefined
                     ? <div className="orb-shot-empty">{tx('这一镜还没生成')}</div>
-                    : <img src={imageSrc} alt={active.sectionLabel} />}
+                    : active.mediaType === 'video'
+                      ? <video src={imageSrc} aria-label={active.sectionLabel} controls muted />
+                      : <img src={imageSrc} alt={active.sectionLabel} />}
                 </div>
 
                 <div className="orb-shot-head">
@@ -955,7 +1054,9 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
                       >
                         {src === undefined
                           ? <span className="orb-shot-card-hole">+</span>
-                          : <img src={src} alt="" />}
+                          : shot.mediaType === 'video'
+                            ? <video src={src} aria-label="" muted />
+                            : <img src={src} alt="" />}
                         <span className="orb-shot-card-time">{shot.duration.toFixed(1)}s</span>
                       </button>
                     )
@@ -1009,7 +1110,7 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
         ) : null}
         </div>
       </section>
-      <section className="orb-card">
+      {visualProvider === 'comfyui' ? <section className="orb-card">
         <div className="orb-card-head">
           <IconSliders className="orb-section-icon" />
           <h3 className="orb-card-title">{tx('生成参数与参考图')}</h3>
@@ -1083,7 +1184,7 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
             </div>
           </div>
         </div>
-      </section>
+      </section> : null}
 
 
       <div className="orb-cta">
@@ -1108,7 +1209,7 @@ export function ShotsScreen({ state, onReload, onSend, onGoToStage }: ShotsScree
         </p>
       </div>
 
-      {pickerOpen ? (
+      {pickerOpen && visualProvider === 'comfyui' ? (
         <AssetPicker
           kinds={['image']}
           onPick={(file) => void addReference(file)}

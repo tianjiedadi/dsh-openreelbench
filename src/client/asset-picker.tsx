@@ -23,6 +23,7 @@ export interface AssetFile {
   name: string
   kind: 'image' | 'video' | 'audio'
   url: string
+  path?: string
   source: 'imported' | 'generated'
   ts?: string
   workflowName?: string | null
@@ -38,6 +39,9 @@ export interface AssetPickerProps {
   current?: string | undefined
   onPick: (file: AssetFile) => void
   onClose: () => void
+  /** Optional project-local source used when ComfyUI is not installed. */
+  listFiles?: () => Promise<AssetFile[]>
+  uploadFile?: (file: File) => Promise<AssetFile>
 }
 
 type SourceTab = 'all' | 'imported' | 'generated'
@@ -53,9 +57,10 @@ type SourceTab = 'all' | 'imported' | 'generated'
  *
  * Returns an empty map until the fetch lands; callers fall back for that frame.
  */
-export function useAssetUrls(): ReadonlyMap<string, string> {
+export function useAssetUrls(enabled = true): ReadonlyMap<string, string> {
   const [urls, setUrls] = useState<Map<string, string>>(() => new Map())
   useEffect(() => {
+    if (!enabled) return
     let live = true
     void fetch('/comfyui/loadarea')
       .then((response) => response.json() as Promise<{ files?: Array<{ name: string; url: string }> }>)
@@ -69,7 +74,7 @@ export function useAssetUrls(): ReadonlyMap<string, string> {
       })
       .catch(() => {})
     return () => { live = false }
-  }, [])
+  }, [enabled])
   return urls
 }
 
@@ -78,7 +83,7 @@ export function inputAssetUrl(name: string): string {
   return '/comfyui/media?' + new URLSearchParams({ file: name, subfolder: '', type: 'input' }).toString()
 }
 
-export function AssetPicker({ kinds, current, onPick, onClose }: AssetPickerProps): JSX.Element {
+export function AssetPicker({ kinds, current, onPick, onClose, listFiles, uploadFile }: AssetPickerProps): JSX.Element {
   const [files, setFiles] = useState<AssetFile[]>([])
   const [tab, setTab] = useState<SourceTab>('all')
   const [loading, setLoading] = useState(true)
@@ -89,17 +94,25 @@ export function AssetPicker({ kinds, current, onPick, onClose }: AssetPickerProp
 
   async function refresh(): Promise<void> {
     try {
-      const data = await fetch('/comfyui/loadarea').then((response) => response.json()) as
-        { ok?: boolean; files?: AssetFile[] }
-      setFiles(data.files ?? [])
+      if (listFiles !== undefined) {
+        setFiles(await listFiles())
+      } else {
+        const data = await fetch('/comfyui/loadarea').then((response) => response.json()) as
+          { ok?: boolean; files?: AssetFile[] }
+        setFiles(data.files ?? [])
+      }
       setError(null)
     } catch (cause) {
-      setError(tx('读不到 ComfyUI 的素材列表：') + (cause as Error).message)
+      setError((listFiles === undefined ? tx('读不到 ComfyUI 的素材列表：') : tx('读不到项目参考素材：'))
+        + (cause as Error).message)
     } finally {
       setLoading(false)
     }
   }
 
+  // The picker is mounted when it opens, so the initial source function is
+  // stable for its whole lifetime. Depending on the inline parent callback
+  // made every parent render trigger another refresh and could race an upload.
   useEffect(() => { void refresh() }, [])
 
   // Escape closes, as a modal should.
@@ -126,9 +139,11 @@ export function AssetPicker({ kinds, current, onPick, onClose }: AssetPickerProp
     setBusy(true)
     setError(null)
     try {
-      const name = await comfy.uploadAsset(file)
+      const uploaded = uploadFile === undefined
+        ? { name: await comfy.uploadAsset(file) }
+        : await uploadFile(file)
       await refresh()
-      setFlash(tx('已上传：') + name)
+      setFlash(tx('已上传：') + uploaded.name)
       window.setTimeout(() => setFlash(null), 2500)
     } catch (cause) {
       setError((cause as Error).message)

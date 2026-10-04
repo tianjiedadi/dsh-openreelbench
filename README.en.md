@@ -116,17 +116,59 @@ creative quality, the other half assist the craft:
 
 ## Install
 
-- **DeepSeek Harness ≥ 0.1.2** (the 0.1.5-rc line recommended), Node ≥ 22.19, `ffmpeg` / `ffprobe` on PATH
-- **Companion plugin**: [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) ≥ 0.4.0 — the execution end of every generation; install it first and prepare your workflows
+For this modified build, install the precompiled `dsh-openreelbench-0.1.0-alpha.11.tgz`
+by entering its absolute path in DSH's plugin manager. See [installation instructions](INSTALL.md).
+
+xAI / Grok Imagine video support includes automatic model detection, one local reference image,
+480p / 720p selection, task polling, and authenticated downloads. Gateway setup is covered in INSTALL.md.
+
+- **DeepSeek Harness 0.2.0-rc.2**, Node ≥ 22.19, `ffmpeg` / `ffprobe` on PATH
+- **Companion plugin (optional)**: [dsh-comfyui](https://github.com/fandc520/dsh-comfyui) ≥ 0.4.0 — install it and prepare workflows when using the ComfyUI provider
 
 ```sh
-npx -p @deepseek-ai/dsh dsh plugin --profile <your profile> add dsh-openreelbench
+npx -p @deepseek-ai/dsh@0.2.0-rc.2 dsh plugin --profile <your non-desktop profile> add "<absolute path to plugin.tgz>"
 ```
 
 Restart the profile after installing. Configure it under **Settings → OpenReel Creative Bench**,
 or the `openreel` layer of `cordis.yml` — the binding table only carries workflow **names**; how
 to drive each workflow is decided by its own parameter sheet.
 More in [the plugin development standard](docs/PLUGIN_DEVELOPMENT.md).
+
+### Generation providers
+
+The narration and shots pages let you choose **ComfyUI** or **API model** per project. API mode calls the
+configured HTTP endpoint directly, downloads the result into the project assets, and then uses the same
+manifest, approval gates, and FFmpeg pipeline. Shots can use either image or video output in API mode; video
+assets enter the existing timeline as `video` assets.
+
+Configure endpoints, model names, and an API key (or an API key environment variable) under
+`Generation providers and API` in the settings page. Requests are JSON POSTs. Image and video endpoints receive
+`prompt`, `model`, `width`, `height`, `size`, and duration fields; voice endpoints receive `input`/`text`, `voice`,
+and `model`. Responses may be direct media or common `url`, `data[0].url`, `b64_json`, and `base64` shapes.
+For asynchronous video APIs, set `pollUrl` and use `{id}` for the task id.
+
+All three API modes support custom gateway URLs and keys. Complete endpoints retain their meaning;
+bare origins and version roots such as `/v1` are expanded to the common generation paths. For custom video
+protocols, specify the complete endpoint required by the gateway.
+
+Image, video, and voice models now use a shared picker. Saved connections load their model list automatically;
+new connection fields can be queried with **Get models** before saving. `modelsUrl` overrides the inferred GET
+`/models` address. Filtering uses capability metadata or model names; **Show all models** and manual entry
+support gateways with custom names. A listing does not guarantee that the generation channel is enabled.
+
+Voice also offers an optional native DashScope Qwen TTS protocol. An empty address uses the Beijing endpoint.
+If the compatibility models endpoint does not list supported Qwen TTS models, an explicitly labeled bundled
+official catalog is shown instead; it does not claim account availability. Reference audio uses native enrollment
+and a project-local `assets/voice-clones.json` cache scoped to audio content, target model, service, and account.
+Only one reference clip is accepted per native enrollment. Native Instruct models use `instructions`.
+Audio files are named from their actual signature; placeholder WAV lengths are repaired before saving.
+
+API shots now offer per-project, separate image and video input dimensions. Choose a convenient preset or
+enter custom integer width and height, then save. Both client and host validate dimensions without rounding
+them to another model size. The final render profile is displayed separately, with an aspect-ratio hint when
+cropping or padding will be required. Video can use a fixed model-supported duration instead of each shot's
+planned duration. Workflow, ComfyUI reference image, and LoRA controls appear only in ComfyUI mode.
+Reordering or reweighting existing API assets preserves their model, resolution, format, and provenance.
 
 ## This is only the beginning
 
@@ -137,6 +179,25 @@ pipelines will grow on the same spine.
 It is an experiment in human–AI co-creation for the intelligent era — and a solid foundation for
 the fully intelligent, automated creation to come.
 
+## Attribution
+
+This project **references the source code of another project and adds features on top of it**.
+
+- Upstream repository: [fandc520/dsh-openreelbench](https://github.com/fandc520/dsh-openreelbench)
+- Upstream author: fandc (GitHub: [@fandc520](https://github.com/fandc520))
+- Upstream licence: MIT (Copyright (c) 2026 fandc)
+
+What was added on top of the referenced code is listed in [`NOTICE`](./NOTICE).
+Copyright of the original code stays with its author, and the upstream copyright notice
+is reproduced in [`LICENSE`](./LICENSE) as the MIT licence requires. If you are the
+upstream author and would like this notice changed or removed, please open an issue.
+
 ## License
 
 MIT
+
+## alpha.6: novel import and API reference media
+
+Import TXT or Markdown novels on the welcome or project screen. Choose chapters, preview sections and shots, then approve the brief and review the imported script. UTF-8, GB18030/GBK, and BOM-marked UTF-16 are supported. Source text is preserved; long novels can be imported as separate chapter projects.
+
+API mode supports text or reference image generation, and text, image, or video reference video generation. Reference files can be uploaded, previewed, selected and removed from the selection. JSON and multipart formats, endpoints and field names are configurable. KKRICH Seedance uses its documented protocol, model limits, polling and authenticated downloads. Its reference inputs require public HTTPS URLs or platform-issued asset IDs; local files and base64 are rejected by that service. See [installation guide](INSTALL.md) for details.

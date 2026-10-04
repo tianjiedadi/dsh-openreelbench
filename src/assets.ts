@@ -98,7 +98,10 @@ export async function importAssets(
 ): Promise<ImportedAsset[]> {
   const imported: ImportedAsset[] = []
   for (const [index, item] of items.entries()) {
-    const targetDir = toPosix(item.kind === 'image' ? layout.imagesDir : layout.audioDir)
+    const targetDir = toPosix(
+      item.kind === 'image' ? layout.imagesDir
+        : layout.audioDir,
+    )
     await ensureDir(targetDir)
     const ext = assetExtension(item.source, item.kind)
 

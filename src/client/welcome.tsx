@@ -20,6 +20,7 @@ import { type Catalog, type LibraryProject, api } from './api.ts'
 import { IconClapper, IconHistory, IconSpark } from './icons.tsx'
 import { ProjectCard } from './project-card.tsx'
 import { TrashSection } from './trash.tsx'
+import { NovelImport } from './novel-import.tsx'
 import type { TrashEntry } from './api.ts'
 
 import { tx } from './i18n.ts'
@@ -204,10 +205,10 @@ export function Welcome({
               holes. Fixed pixels keep the strip identical at every size. */}
           <div className="orb-poster-strip" aria-hidden="true" />
           <div className="orb-poster-body">
-            <span className="orb-hero-sub">OpenReelbench · powered by ComfyUI</span>
+            <span className="orb-hero-sub">OpenReelbench · ComfyUI / API</span>
             <h1 className="orb-hero-title">{tx('开源视频创意台')}</h1>
             <p className="orb-hero-tagline">
-              {tx('基于 ComfyUI 与 DSH 开源生态的内容创作平台 —— 专业创作管线 · 原生 AI 人机协同')}
+              {tx('DSH 内容创作插件 · 支持 ComfyUI 与模型 API · 小说导入与分镜创作')}
             </p>
           </div>
         </div>
@@ -271,6 +272,8 @@ export function Welcome({
           })}
         </div>
       </section>
+
+      <NovelImport disabled={busy} onImported={async id => { await onRefresh(); onOpenProject(id) }} />
 
       {projects.length > 0 ? (
         <section className="orb-section">

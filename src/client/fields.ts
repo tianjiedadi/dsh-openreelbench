@@ -7,9 +7,7 @@
  * halves of the same contract, and a table is something you can read next to
  * `config.ts` and see what is missing.
  *
- * Writes are grouped by the FIRST path segment because the scope's `set` takes
- * a top-level field of the section — editing `video.crf` means writing the
- * whole `video` object back with that one key replaced.
+ * Writes use path mutations so DSH's redacted secret fields are preserved.
  */
 import { BUILT_IN_PLAYBOOKS } from '../playbooks.ts'
 import { LANGUAGE_OPTIONS, tx } from './i18n.ts'
@@ -21,7 +19,7 @@ export interface FieldSpec {
   label: string
   hint?: string
   placeholder?: string
-  kind: 'text' | 'number' | 'boolean' | 'select' | 'list'
+  kind: 'text' | 'secret' | 'number' | 'boolean' | 'select' | 'list' | 'model'
   /**
    * A number field that takes fractions.
    *
@@ -92,6 +90,72 @@ export const FIELD_GROUPS: FieldGroup[] = [
         placeholder: 'D:/AiStudio',
         kind: 'text',
       },
+    ],
+  },
+  {
+    title: '生成提供方与 API',
+    blurb: '分镜和配音页面可按项目切换。API 返回图片/视频 URL 或 base64，文件会下载到当前项目目录。',
+    fields: [
+      {
+        path: ['generation', 'visualProvider'],
+        label: '视觉默认提供方',
+        kind: 'select',
+        options: () => [
+          { value: 'comfyui', label: 'ComfyUI' },
+          { value: 'api', label: 'API 模型' },
+        ],
+      },
+      {
+        path: ['generation', 'visualMode'],
+        label: 'API 视觉媒体',
+        kind: 'select',
+        options: () => [
+          { value: 'image', label: '图片' },
+          { value: 'video', label: '视频' },
+        ],
+      },
+      {
+        path: ['generation', 'voiceProvider'],
+        label: '配音默认提供方',
+        kind: 'select',
+        options: () => [
+          { value: 'comfyui', label: 'ComfyUI' },
+          { value: 'api', label: 'API 模型' },
+        ],
+      },
+      { path: ['generation', 'api', 'image', 'endpoint'], label: '文生图 API 地址', placeholder: 'https://api.example.com/v1/images/generations', kind: 'text' },
+      { path: ['generation', 'api', 'image', 'model'], label: '文生图模型', kind: 'model' },
+      { path: ['generation', 'api', 'image', 'apiKey'], label: '文生图 API Key', placeholder: '留空保留已保存的 Key', kind: 'secret' },
+      { path: ['generation', 'api', 'image', 'apiKeyEnv'], label: '文生图 Key 环境变量', placeholder: 'OPENAI_API_KEY', kind: 'text' },
+      { path: ['generation', 'api', 'image', 'modelsUrl'], label: '文生图模型列表地址', hint: '可留空自动推导；支持中转站自定义 GET 查询地址。', placeholder: 'https://api.example.com/v1/models', kind: 'text' },
+      { path: ['generation', 'api', 'video', 'endpoint'], label: '文生视频 API 地址', placeholder: 'https://api.example.com/v1/videos', kind: 'text' },
+      { path: ['generation', 'api', 'video', 'visualProtocol'], label: '视频接口协议', kind: 'select', options: () => [
+        { value: 'auto', label: '自动（识别 Seedance / Grok Imagine）' },
+        { value: 'json', label: '通用 JSON' },
+        { value: 'multipart', label: '文件上传（multipart）' },
+        { value: 'kkrich', label: 'KKRICH Seedance' },
+        { value: 'xai', label: 'xAI / Grok Imagine' },
+      ] },
+      { path: ['generation', 'api', 'video', 'resolution'], label: 'Grok 视频分辨率', hint: '只对 xAI 协议生效，默认 720p；自定义像素尺寸用于最终合成。', kind: 'select', options: () => [
+        { value: '480p', label: '480p' }, { value: '720p', label: '720p' },
+      ] },
+      { path: ['generation', 'api', 'video', 'model'], label: '文生视频模型', kind: 'model' },
+      { path: ['generation', 'api', 'video', 'apiKey'], label: '文生视频 API Key', placeholder: '留空保留已保存的 Key', kind: 'secret' },
+      { path: ['generation', 'api', 'video', 'apiKeyEnv'], label: '文生视频 Key 环境变量', placeholder: 'VIDEO_API_KEY', kind: 'text' },
+      { path: ['generation', 'api', 'video', 'modelsUrl'], label: '文生视频模型列表地址', hint: '可留空自动推导；支持中转站自定义 GET 查询地址。', placeholder: 'https://api.example.com/v1/models', kind: 'text' },
+      { path: ['generation', 'api', 'video', 'pollUrl'], label: '视频任务查询地址', hint: '异步接口可填完整地址（例如 https://api.example.com/v1/videos/{id}）；只填 /v1、/videos 或 /video/generations 会自动补任务路径。允许使用不同域名的对应查询接口；同步返回视频 URL 时留空。', kind: 'text' },
+      { path: ['generation', 'api', 'voice', 'protocol'], label: '语音接口协议', kind: 'select', options: () => [
+        { value: 'openai', label: '通用 / 中转站（OpenAI 兼容）' },
+        { value: 'dashscope', label: '阿里云百炼原生（可选）' },
+      ] },
+      { path: ['generation', 'api', 'voice', 'endpoint'], label: '语音 API 地址', hint: '支持自己的中转站根地址、/v1 或完整生成接口。百炼原生模式可留空。', placeholder: 'https://api.example.com/v1/audio/speech', kind: 'text' },
+      { path: ['generation', 'api', 'voice', 'model'], label: '语音模型', kind: 'model' },
+      { path: ['generation', 'api', 'voice', 'apiKey'], label: '语音 API Key', placeholder: '留空保留已保存的 Key', kind: 'secret' },
+      { path: ['generation', 'api', 'voice', 'apiKeyEnv'], label: '语音 Key 环境变量', hint: '填写 DSH 进程的环境变量名称，不是 Key 本身。', placeholder: 'TTS_API_KEY', kind: 'text' },
+      { path: ['generation', 'api', 'voice', 'modelsUrl'], label: '语音模型列表地址', hint: '可留空自动推导；百炼未返回 TTS 模型时加载内置官方目录，来源会明确标注。', placeholder: 'https://api.example.com/v1/models', kind: 'text' },
+      { path: ['generation', 'api', 'voice', 'cloneCache'], label: '百炼复刻音色缓存', hint: '保存在当前项目，相同音频、模型、账号和服务只复刻一次。', kind: 'boolean' },
+      { path: ['generation', 'api', 'voice', 'instructions'], label: '百炼指令控声', hint: '仅 qwen3-tts-instruct-flash 系列生效。', placeholder: '语速偏慢，沉稳温柔', kind: 'text' },
+      { path: ['generation', 'api', 'voice', 'enrollmentEndpoint'], label: '百炼声音复刻地址', hint: '可留空使用对应地域公共接口；代理百炼原生协议的中转站可自定义。', kind: 'text' },
     ],
   },
   {

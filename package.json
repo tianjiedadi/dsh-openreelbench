@@ -1,7 +1,7 @@
 {
   "name": "dsh-openreelbench",
-  "version": "0.1.0-alpha.1",
-  "description": "OpenReelbench, the open video creative bench for DeepSeek Harness: a gated four-stage pipeline (brief -> script -> assets -> compose) that turns one sentence into a narrated explainer video; generation via ComfyUI workflows, assembly with FFmpeg. / DSH 开源视频创意台：四段带审批闸的管线，把一句话变成一条带配音、配图和字幕的解说片；生成走 ComfyUI，合成走 FFmpeg。",
+  "version": "0.1.0-alpha.11",
+  "description": "OpenReelbench, the open video creative bench for DeepSeek Harness: a gated pipeline that turns one sentence into a narrated explainer video; generation via ComfyUI or configurable image/video/voice APIs, assembly with FFmpeg. / DSH 开源视频创意台：带审批闸的创作管线，把一句话变成带配音、配图或视频和字幕的解说片；生成可选 ComfyUI 或模型 API，合成走 FFmpeg。",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -20,16 +20,20 @@
     "cordis.patch.yml",
     "README.md",
     "README.en.md",
+    "INSTALL.md",
+    "docs/PLUGIN_DEVELOPMENT.md",
+    "images",
     "LICENSE"
   ],
   "scripts": {
     "build": "npm run build:host && npm run build:client",
+    "pack:plugin": "npm run build && node scripts/package-plugin.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.client.json --noEmit",
     "prepare": "npm run build",
     "pretest": "npm run build",
     "test": "node test/smoke.mjs",
     "build:host": "tsc -p tsconfig.json",
-    "build:client": "tsdown -c tsdown.config.mjs",
+    "build:client": "tsc -p tsconfig.client.json --noEmit && tsdown -c tsdown.config.mjs",
     "inspect": "node test/inspect.mjs",
     "sync-docs": "node scripts/sync-docs.mjs"
   },
@@ -47,24 +51,25 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/fandc520/dsh-openreelbench.git"
+    "url": "git+https://github.com/tianjiedadi/dsh-openreelbench.git"
   },
-  "homepage": "https://github.com/fandc520/dsh-openreelbench#readme",
+  "homepage": "https://github.com/tianjiedadi/dsh-openreelbench#readme",
   "bugs": {
-    "url": "https://github.com/fandc520/dsh-openreelbench/issues"
+    "url": "https://github.com/tianjiedadi/dsh-openreelbench/issues"
   },
   "engines": {
     "node": ">=22.19"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.0",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.4"
+    "@deepseek-ai/schemastery": "~3.18.4"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.2"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-settings": "0.2.0-rc.2",
     "@types/node": "^24.0.0",
     "@types/react": "~18.3.1",
     "react": "^18.3.1",
@@ -78,7 +83,6 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-conversation"
       ]

@@ -13,6 +13,7 @@
  *     checkpoints/history/         superseded checkpoints, newest last
  *     artifacts/<name>.json        the artifact each stage produced
  *     assets/images/               txt2img output
+ *     assets/videos/               text-to-video output
  *     assets/audio/                TTS output
  *     originals/<asset path>       pre-trim copies, so a trim can be undone
  *     work/                        render scratch, safe to delete
@@ -21,6 +22,7 @@
 import { homedir } from 'node:os'
 import { join, resolve, sep, isAbsolute } from 'node:path'
 import { type Dirent, promises as fs } from 'node:fs'
+import type { GenerationSize } from './generation-size.js'
 
 export const PROJECT_MARKER = 'project.json'
 
@@ -44,6 +46,14 @@ export interface ProjectMarker {
    * user edits directly.
    */
   target_platform?: string
+  /** Per-project generation choices; absent means follow plugin defaults. */
+  visual_provider?: 'comfyui' | 'api'
+  visual_mode?: 'image' | 'video'
+  /** API image/video input dimensions, independent of the film's output frame. */
+  api_visual_sizes?: Partial<Record<'image' | 'video', GenerationSize>>
+  /** Optional fixed API video duration; absent follows each shot's planned duration. */
+  api_video_seconds?: number
+  voice_provider?: 'comfyui' | 'api'
   /**
    * The narration voice this project uses, as the TTS workflow names it.
    * Designing a voice is a preparation step outside the pipeline: the user
@@ -105,6 +115,10 @@ export interface ProjectMarker {
    * workflow an audio file whenever the slot order happened to line up.
    */
   voice_references?: string[]
+  /** Project-local reference files uploaded for API TTS providers. */
+  voice_reference_paths?: string[]
+  api_visual_references?: Partial<Record<'image' | 'video', import('./visual-references.js').VisualReferences>>
+  novel_import?: import('./novel.js').NovelImportInfo
   /**
    * The background music bed: which workflow scored it, and where the file is.
    *
@@ -156,7 +170,9 @@ export interface ProjectLayout {
   artifactsDir: string
   assetsDir: string
   imagesDir: string
+  videosDir: string
   audioDir: string
+  voiceReferencesDir: string
   workDir: string
   outputDir: string
   /**
@@ -228,7 +244,9 @@ export function projectLayout(root: string, id: string): ProjectLayout {
     artifactsDir: join(dir, 'artifacts'),
     assetsDir: join(dir, 'assets'),
     imagesDir: join(dir, 'assets', 'images'),
+    videosDir: join(dir, 'assets', 'videos'),
     audioDir: join(dir, 'assets', 'audio'),
+    voiceReferencesDir: join(dir, 'assets', 'references', 'voice'),
     workDir: join(dir, 'work'),
     originalsDir: join(dir, 'originals'),
     outputDir: join(dir, 'output'),
@@ -274,7 +292,9 @@ export async function ensureLayout(layout: ProjectLayout): Promise<void> {
   await ensureDir(layout.historyDir)
   await ensureDir(layout.artifactsDir)
   await ensureDir(layout.imagesDir)
+  await ensureDir(layout.videosDir)
   await ensureDir(layout.audioDir)
+  await ensureDir(layout.voiceReferencesDir)
   await ensureDir(layout.workDir)
   await ensureDir(layout.outputDir)
 }

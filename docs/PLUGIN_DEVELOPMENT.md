@@ -1,5 +1,11 @@
 # 插件开发标准 —— UI 注入
 
+> **DSH 0.2.0-rc.2 note:** this plugin exposes live settings with `Config`
+> fields marked `.volatile()`, opts out of the generic form with
+> `ctx.settings.configure({ auto: false })`, and reads the custom page through
+> the client `configForms` service. The older `installSettingsSection` and
+> `settingsScope` examples below are historical pre-0.2 API notes.
+
 > 适用对象：给 DeepSeek Harness（DSH）写带界面的插件。
 > 本仓库（dsh-openreelbench）是这份标准的活样例：设置页（`settings.section`）、
 > 设置数据（`settingsScope` 命名空间）都在 `src/client/` 里，可以直接抄。
@@ -354,3 +360,4 @@ npm run build:client      # tsdown → client/client.js (+ .map)
 - `conversation.session.header.actions` —— "成片库"按钮（新 id）；
 - `conversation.view` —— "成片"视图 tab（新 id + label，会话体用 `only:` 切换）；
 - `shell.overlay` —— 生成完成的 toast / 徽标（新 id）。
+

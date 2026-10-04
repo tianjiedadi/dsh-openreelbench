@@ -1,0 +1,26 @@
+dsh-openreelbench
+Copyright (c) 2026 fandc
+
+This project references the source code of the upstream project below and adds
+features on top of it. It is a derivative work. Copyright of the original code
+stays with its author, and this notice exists to say so plainly.
+
+  Upstream repository : https://github.com/fandc520/dsh-openreelbench
+  Upstream author     : fandc (GitHub: @fandc520)
+  Upstream licence    : MIT — Copyright (c) 2026 fandc
+
+Features added on top of the referenced code:
+
+  - Rebuilt the panel as a gated four-stage pipeline (brief / script / assets / compose),
+    each stage written as an artifact that can park at an approval gate.
+  - Added configurable image / video / voice HTTP providers alongside the ComfyUI workflows.
+  - Added the xAI Grok Imagine video protocol (request_id polling, aspect-ratio mapping,
+    data-URI reference frames, authenticated result download).
+  - Added TXT/MD novel import with automatic paragraph and shot segmentation.
+  - Added editing versions (cuts), subtitle styling, and per-section pause / trim controls.
+  - Added bilingual UI (Chinese / English).
+
+The upstream copyright notice — "Copyright (c) 2026 fandc", under the MIT licence —
+is reproduced in this repository's LICENSE, as that licence requires. If you are the
+upstream author and want this notice changed or removed, please open an issue and it
+will be handled.

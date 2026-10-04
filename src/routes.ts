@@ -17,6 +17,7 @@
  *   GET  /openreel/cuts?project=        edit versions of the finished film
  *   POST /openreel/cuts                 save one
  *   POST /openreel/cuts/delete          drop one
+ *   POST /openreel/generate              generate media through a configured API
  *   POST /openreel/stage                a panel's submit button
  *
  * Three of the four are reads. The one write goes through `StateMachine.write()`
@@ -31,11 +32,12 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { basename, extname, join, resolve, sep } from 'node:path'
 import { promises as fs } from 'node:fs'
 
 import {
-  type ArtifactName, type AssetManifest, type ScenePlan, type SceneShot, type Script,
+  type ArtifactName, type AssetManifest, type AssetRecord, type ScenePlan, type SceneShot, type Script,
   PLATFORMS, formatIssues, validateArtifact,
 } from './schema.js'
 import { ProjectError, type ProjectLayout, resolveInProject, toProjectRelative } from './project.js'
@@ -50,9 +52,15 @@ import {
 import { MIX_BOUNDS } from './audio-mix.js'
 import { CONTENT_LANGUAGE_IDS, resolveContentLanguage } from './content-language.js'
 import { resolveVideoProfile } from './media-profile.js'
+import { type GenerationSize, generationSizeError, resolveGenerationSize, videoSecondsError } from './generation-size.js'
 import { listPipelines, resolvePipeline } from './pipelines.js'
 import { planSections } from './compose.js'
 import { type ComposeResultPayload, composeProject } from './render-job.js'
+import { GenerationApiError, generateImage, generateVideo, generateVoice } from './generation-api.js'
+import { discoverApiModels } from './api-models.js'
+import { mountNovelRoutes } from './novel-routes.js'
+import { checkVisualReferences, saveVisualReference, REFERENCE_MAX_BYTES, type VisualReferences } from './visual-references.js'
+import type { ApiEndpointConfig, VoiceApiConfig } from './config.js'
 import { CutError, type Cut, deleteCut, listCuts, parseCut, readCut, writeCut } from './cuts.js'
 import { STAGES, STAGE_ARTIFACT, StateViolationError, isStage, isStatus } from './state.js'
 import type { PluginRuntime } from './tools.js'
@@ -93,6 +101,10 @@ function fail(response: ServerResponse, error: unknown): void {
   }
   if (error instanceof CutError) {
     sendJson(response, 400, { error: error.message, code: 'BAD_CUT' })
+    return
+  }
+  if (error instanceof GenerationApiError) {
+    sendJson(response, 502, { error: error.message, code: 'GENERATION_API_FAILED' })
     return
   }
   if (error instanceof ProjectError) {
@@ -357,6 +369,7 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
 
   const disposers: Array<() => void> = []
   const { machine } = runtime
+  disposers.push(...mountNovelRoutes(webServer, runtime))
 
   /**
    * In-flight renders, one per project.
@@ -523,18 +536,46 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
           cuts,
           film: filmPath === undefined ? null : { path: filmPath, url: mediaUrl(projectId, filmPath) },
           bindings: config.bindings,
+          providers: {
+            visual: status.project.visual_provider ?? config.generation.visualProvider,
+            visual_mode: status.project.visual_mode ?? config.generation.visualMode,
+            voice: status.project.voice_provider ?? config.generation.voiceProvider,
+            defaults: {
+              visual: config.generation.visualProvider,
+              visual_mode: config.generation.visualMode,
+              voice: config.generation.voiceProvider,
+            },
+            api: {
+              image: { configured: config.generation.api.image.endpoint.trim() !== '', model: config.generation.api.image.model },
+              video: { configured: config.generation.api.video.endpoint.trim() !== '', model: config.generation.api.video.model },
+              voice: { configured: config.generation.api.voice.protocol === 'dashscope' || config.generation.api.voice.endpoint.trim() !== '', model: config.generation.api.voice.model },
+            },
+          },
           // The frame, resolved once and served: the platform's baseline times
           // the render scale. The shots screen needs the SAME numbers compose
           // will cut to — a panel that worked them out again in the browser is
           // exactly how a vertical project ended up with 16:9 stills.
-          frame: resolveVideoProfile(
-            status.project.target_platform
-              ?? (typeof (artifacts.brief as { target_platform?: unknown } | undefined)?.target_platform === 'string'
-                ? (artifacts.brief as { target_platform: string }).target_platform
-                : undefined),
-            config.video.renderScale,
-            config.video.fps,
-          ),
+          frame: (() => {
+            const platformFrame = resolveVideoProfile(
+              status.project.target_platform
+                ?? (typeof (artifacts.brief as { target_platform?: unknown } | undefined)?.target_platform === 'string'
+                  ? (artifacts.brief as { target_platform: string }).target_platform
+                  : undefined),
+              config.video.renderScale,
+              config.video.fps,
+            )
+            const provider = status.project.visual_provider ?? config.generation.visualProvider
+            const mode = status.project.visual_mode ?? config.generation.visualMode
+            const custom = provider === 'api' ? status.project.api_visual_sizes?.[mode] : undefined
+            return custom === undefined ? platformFrame : {
+              ...platformFrame,
+              width: custom.width,
+              height: custom.height,
+              source: 'default' as const,
+              shape: '自定义 ' + custom.width + '×' + custom.height,
+              label: '自定义 ' + custom.width + '×' + custom.height,
+            }
+          })(),
           // Which takes have a pre-trim copy on disk, so the panel can offer
           // undo on exactly those. A separate top-level key rather than a flag
           // inside the manifest, for the same reason `prompts` is one: the
@@ -601,12 +642,19 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
           targetDurationSeconds?: number
           style?: string
           voice?: string
+          visualProvider?: 'comfyui' | 'api'
+          visualMode?: 'image' | 'video'
+          apiVisualSize?: { mode: 'image' | 'video'; size: GenerationSize | null }
+          apiVideoSeconds?: number | null
+          voiceProvider?: 'comfyui' | 'api'
           voiceDesignName?: string
           voiceDesignPrompt?: string
           loraName?: string
           loraStrength?: number
           references?: string[]
           voiceReferences?: string[]
+          voiceReferencePaths?: string[]
+          apiVisualReferences?: { mode: 'image' | 'video'; value: VisualReferences }
           music?: {
             path?: string; workflow?: string; prompt?: string
             gain_db?: number; fade_in?: number; fade_out?: number
@@ -617,6 +665,48 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
         if (typeof input.title === 'string' && input.title.trim() !== '') patch.title = input.title.trim()
         if (typeof input.style === 'string' && input.style.trim() !== '') patch.style = input.style.trim()
         if (typeof input.voice === 'string') patch.voice = input.voice.trim()
+        if (input.visual_provider === 'comfyui' || input.visual_provider === 'api') {
+          patch.visualProvider = input.visual_provider
+        }
+        if (input.visual_mode === 'image' || input.visual_mode === 'video') {
+          patch.visualMode = input.visual_mode
+        }
+        if ('api_visual_size' in input) {
+          const setting = input.api_visual_size
+          if (setting === null || typeof setting !== 'object' || Array.isArray(setting)) {
+            sendJson(response, 400, { error: 'api_visual_size must contain mode and size' }); return
+          }
+          const entry = setting as Record<string, unknown>
+          if (entry.mode !== 'image' && entry.mode !== 'video') {
+            sendJson(response, 400, { error: 'api_visual_size.mode must be image or video' }); return
+          }
+          if (entry.size === null) patch.apiVisualSize = { mode: entry.mode, size: null }
+          else {
+            const error = generationSizeError(entry.size)
+            if (error !== undefined) { sendJson(response, 400, { error }); return }
+            const size = entry.size as GenerationSize
+            patch.apiVisualSize = { mode: entry.mode, size: { width: size.width, height: size.height } }
+          }
+        }
+        if ('api_video_seconds' in input) {
+          if (input.api_video_seconds === null) patch.apiVideoSeconds = null
+          else {
+            const error = videoSecondsError(input.api_video_seconds)
+            if (error !== undefined) { sendJson(response, 400, { error }); return }
+            patch.apiVideoSeconds = input.api_video_seconds as number
+          }
+        }
+        if (input.voice_provider === 'comfyui' || input.voice_provider === 'api') {
+          patch.voiceProvider = input.voice_provider
+        }
+        if ('api_visual_references' in input) {
+          const setting = input.api_visual_references as { mode?: unknown; value?: unknown } | null
+          if (setting === null || typeof setting !== 'object' || (setting.mode !== 'image' && setting.mode !== 'video')) {
+            sendJson(response, 400, { error: '参考素材须指定图片或视频模式。' }); return
+          }
+          const { layout } = await machine.requireProject(input.project)
+          patch.apiVisualReferences = { mode: setting.mode, value: await checkVisualReferences(layout, setting.mode, setting.value) }
+        }
         if (typeof input.language === 'string') {
           const language = input.language.trim()
           // Checked rather than trusted: this steers what the model writes, so
@@ -661,6 +751,12 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
         }
         if (Array.isArray(input.voice_references)) {
           patch.voiceReferences = input.voice_references
+            .filter((entry): entry is string => typeof entry === 'string')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry !== '')
+        }
+        if (Array.isArray(input.voice_reference_paths)) {
+          patch.voiceReferencePaths = input.voice_reference_paths
             .filter((entry): entry is string => typeof entry === 'string')
             .map((entry) => entry.trim())
             .filter((entry) => entry !== '')
@@ -967,6 +1063,129 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
           projects.push(await libraryEntry(machine.layout(summary.id), summary.title, summary.created_at))
         }
         sendJson(response, 200, { projects })
+      } catch (error) {
+        fail(response, error)
+      }
+    },
+  }))
+
+  disposers.push(webServer.register({
+    kind: 'exact', path: '/openreel/reference/file',
+    handler: async (request, response) => {
+      try {
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'POST only' }); return }
+        if (!sameOrigin(request)) { sendJson(response, 403, { error: 'cross-origin writes are refused' }); return }
+        const params = query(request)
+        const kind = params.get('kind')
+        if (kind !== 'image' && kind !== 'video') { sendJson(response, 400, { error: 'kind must be image or video' }); return }
+        const { layout } = await machine.requireProject(params.get('project') ?? '')
+        const chunks: Buffer[] = []
+        let length = 0
+        for await (const chunk of request) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+          length += bytes.length
+          if (length > REFERENCE_MAX_BYTES) { sendJson(response, 413, { error: '参考素材超过 20 MB。' }); return }
+          chunks.push(bytes)
+        }
+        const file = await saveVisualReference(layout, kind, params.get('name') ?? '', Buffer.concat(chunks))
+        sendJson(response, 200, { ...file, url: mediaUrl(layout.id, file.path) })
+      } catch (error) { sendJson(response, 400, { error: (error as Error).message }) }
+    },
+  }))
+
+  // ---- GET /openreel/references ---------------------------------------------
+  // Project-local reference media is the API-provider counterpart to the
+  // ComfyUI input directory. Keeping it in the project lets API voice mode work
+  // without dsh-comfyui at all.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/openreel/references',
+    handler: async (request, response) => {
+      try {
+        if (request.method !== 'GET') {
+          sendJson(response, 405, { error: 'GET only' })
+          return
+        }
+        const project = query(request).get('project') ?? ''
+        if (project === '') {
+          sendJson(response, 400, { error: 'project is required' })
+          return
+        }
+        const { layout } = await machine.requireProject(project)
+        const kind = query(request).get('kind') ?? 'voice'
+        if (!['voice', 'image', 'video'].includes(kind)) { sendJson(response, 400, { error: 'invalid reference kind' }); return }
+        const directory = join(layout.assetsDir, 'references', kind)
+        await fs.mkdir(directory, { recursive: true })
+        const entries = await fs.readdir(directory, { withFileTypes: true })
+        const files = []
+        for (const entry of entries) {
+          if (!entry.isFile()) continue
+          const path = toProjectRelative(layout, join(directory, entry.name))
+          files.push({ name: entry.name, path, url: mediaUrl(project, path) })
+        }
+        files.sort((a, b) => a.name.localeCompare(b.name))
+        sendJson(response, 200, { files })
+      } catch (error) {
+        fail(response, error)
+      }
+    },
+  }))
+
+  // ---- POST /openreel/reference ---------------------------------------------
+  // The browser sends base64 JSON so this route does not depend on a multipart
+  // parser or on dsh-comfyui's upload endpoint.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/openreel/reference',
+    handler: async (request, response) => {
+      try {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { error: 'POST only' })
+          return
+        }
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { error: 'cross-origin writes are refused' })
+          return
+        }
+        const body = await readJsonBody(request)
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(response, 400, { error: 'a JSON object body is required' })
+          return
+        }
+        const input = body as Record<string, unknown>
+        const project = typeof input.project === 'string' ? input.project.trim() : ''
+        const kind = typeof input.kind === 'string' ? input.kind : ''
+        const original = typeof input.name === 'string' ? basename(input.name).trim() : ''
+        const encoded = typeof input.data === 'string' ? input.data : ''
+        if (project === '' || kind !== 'voice' || original === '' || encoded === '') {
+          sendJson(response, 400, { error: 'project, kind=voice, name and base64 data are required' })
+          return
+        }
+        if (encoded.length > 80_000_000 || !/^[A-Za-z0-9+/=\r\n]+$/.test(encoded)) {
+          sendJson(response, 400, { error: 'reference audio must be base64 and smaller than 60 MB' })
+          return
+        }
+        const bytes = Buffer.from(encoded, 'base64')
+        if (bytes.length === 0) {
+          sendJson(response, 400, { error: 'reference audio is empty' })
+          return
+        }
+        const { layout } = await machine.requireProject(project)
+        await fs.mkdir(layout.voiceReferencesDir, { recursive: true })
+        const cleaned = original.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^\.+/, '') || 'voice-reference'
+        const originalExtension = extname(cleaned)
+        const extension = originalExtension === '' ? '.wav' : originalExtension
+        let name = cleaned + (originalExtension === '' ? extension : '')
+        let index = 2
+        while (await fs.access(join(layout.voiceReferencesDir, name)).then(() => true, () => false)) {
+          const stem = originalExtension === '' ? cleaned : cleaned.slice(0, -originalExtension.length)
+          name = stem + '-' + index + extension
+          index += 1
+        }
+        const absolute = join(layout.voiceReferencesDir, name)
+        await fs.writeFile(absolute, bytes)
+        const path = toProjectRelative(layout, absolute)
+        sendJson(response, 200, { name, path, url: mediaUrl(project, path) })
       } catch (error) {
         fail(response, error)
       }
@@ -1283,6 +1502,240 @@ export function mountStudioRoutes(ctx: Context, runtime: PluginRuntime): (() => 
         })()
 
         sendJson(response, 202, { started: true, project })
+      } catch (error) {
+        fail(response, error)
+      }
+    },
+  }))
+
+  // ---- POST /openreel/models -----------------------------------------------
+  // A query may use unsaved connection fields, but never writes them or returns a Key.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/openreel/models',
+    handler: async (request, response) => {
+      try {
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'POST only' }); return }
+        if (!sameOrigin(request)) { sendJson(response, 403, { error: 'cross-origin requests are refused' }); return }
+        const body = await readJsonBody(request)
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(response, 400, { error: 'a JSON object body is required' }); return
+        }
+        const input = body as Record<string, unknown>
+        const kind = input.kind
+        if (kind !== 'voice' && kind !== 'image' && kind !== 'video') {
+          sendJson(response, 400, { error: 'kind=voice|image|video is required' }); return
+        }
+        const connection = input.connection !== null && typeof input.connection === 'object' && !Array.isArray(input.connection)
+          ? input.connection as Record<string, unknown> : {}
+        const saved = runtime.getConfig().generation.api[kind]
+        const config: ApiEndpointConfig & Partial<VoiceApiConfig> = { ...saved }
+        for (const field of ['endpoint', 'modelsUrl', 'apiKeyEnv'] as const) {
+          if (typeof connection[field] === 'string') config[field] = connection[field].trim()
+        }
+        // The client cannot read the saved secret; blank means use it on the host.
+        if (typeof connection.apiKey === 'string' && connection.apiKey.trim() !== '') config.apiKey = connection.apiKey.trim()
+        if (kind === 'voice' && (connection.protocol === 'openai' || connection.protocol === 'dashscope')) config.protocol = connection.protocol
+        sendJson(response, 200, await discoverApiModels(kind, config))
+      } catch (error) { fail(response, error) }
+    },
+  }))
+
+  // ---- POST /openreel/generate ---------------------------------------------
+  // Direct API generation for installations that do not want a ComfyUI round
+  // trip. The route writes the same manifests as the Agent path, so the rest
+  // of the pipeline and its approval gates remain unchanged.
+  disposers.push(webServer.register({
+    kind: 'exact',
+    path: '/openreel/generate',
+    handler: async (request, response) => {
+      try {
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { error: 'POST only' })
+          return
+        }
+        if (!sameOrigin(request)) {
+          sendJson(response, 403, { error: 'cross-origin writes are refused' })
+          return
+        }
+        const body = await readJsonBody(request)
+        if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+          sendJson(response, 400, { error: 'a JSON object body is required' })
+          return
+        }
+        const input = body as Record<string, unknown>
+        const project = typeof input.project === 'string' ? input.project : ''
+        const kind = input.kind
+        if (project === '' || (kind !== 'visual' && kind !== 'voice')) {
+          sendJson(response, 400, { error: 'project and kind=visual|voice are required' })
+          return
+        }
+        if (!Array.isArray(input.items) || input.items.length === 0) {
+          sendJson(response, 400, { error: 'items must be a non-empty array' })
+          return
+        }
+        const config = runtime.getConfig()
+        const { layout, marker } = await machine.requireProject(project)
+        const script = await machine.readArtifact<Script>(layout, 'script')
+        if (script === undefined) {
+          sendJson(response, 409, { error: 'script has not been created yet' })
+          return
+        }
+        const sections = new Map(script.sections.map((section) => [section.id, section]))
+        const mode = input.mode === 'video' ? 'video' : 'image'
+        const outputFrame = resolveVideoProfile(marker.target_platform
+          ?? (await machine.readArtifact<{ target_platform?: string }>(layout, 'brief'))?.target_platform,
+        config.video.renderScale, config.video.fps)
+        let frame = resolveGenerationSize(marker.api_visual_sizes?.[mode], outputFrame)
+        if (kind === 'visual' && 'frame' in input) {
+          const error = generationSizeError(input.frame)
+          if (error !== undefined) { sendJson(response, 400, { error }); return }
+          const custom = input.frame as GenerationSize
+          frame = { width: custom.width, height: custom.height }
+        }
+        const { width, height } = frame
+        const visualReferences = kind === 'visual'
+          ? await checkVisualReferences(layout, mode, marker.api_visual_references?.[mode] ?? { input: 'text', images: [], videos: [] })
+          : undefined
+        const referencePaths = kind === 'voice' && Array.isArray(input.voice_references)
+          ? input.voice_references
+            .filter((entry): entry is string => typeof entry === 'string')
+            .map((entry) => entry.trim())
+            .filter((entry) => entry !== '')
+          : []
+        if (kind === 'voice') {
+          const referencesRoot = resolve(layout.voiceReferencesDir)
+          for (const relative of referencePaths) {
+            let absolute: string
+            try {
+              absolute = resolveInProject(layout, relative)
+            } catch (error) {
+              sendJson(response, 400, { error: 'invalid voice reference path: ' + (error as Error).message })
+              return
+            }
+            if (absolute !== referencesRoot && !absolute.startsWith(referencesRoot + sep)) {
+              sendJson(response, 400, { error: 'voice references must be project uploads under assets/references/voice' })
+              return
+            }
+            try {
+              if (!(await fs.stat(absolute)).isFile()) throw new Error('not a file')
+            } catch {
+              sendJson(response, 400, { error: 'voice reference was not found: ' + relative })
+              return
+            }
+          }
+        }
+        const items: Array<{ sectionId: string; index?: number; text: string; prompt: string; seconds: number }> = []
+        for (const raw of input.items) {
+          if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+            sendJson(response, 400, { error: 'each item must be an object' })
+            return
+          }
+          const item = raw as Record<string, unknown>
+          const sectionId = typeof item.section_id === 'string' ? item.section_id.trim() : ''
+          if (sectionId === '' || !sections.has(sectionId)) {
+            sendJson(response, 400, { error: 'item.section_id must refer to a script section' })
+            return
+          }
+          const index = typeof item.shot_index === 'number' && Number.isInteger(item.shot_index) && item.shot_index >= 0
+            ? item.shot_index : undefined
+          const text = typeof item.text === 'string' ? item.text.trim() : ''
+          const prompt = typeof item.prompt === 'string' ? item.prompt.trim() : ''
+          if (kind === 'visual' && prompt === '') {
+            sendJson(response, 400, { error: 'visual items require prompt' })
+            return
+          }
+          if (kind === 'voice' && text === '') {
+            sendJson(response, 400, { error: 'voice items require text' })
+            return
+          }
+          const seconds = item.seconds ?? marker.api_video_seconds ?? 4
+          if (kind === 'visual' && mode === 'video') {
+            const error = videoSecondsError(seconds)
+            if (error !== undefined) { sendJson(response, 400, { error }); return }
+          }
+          items.push({
+            sectionId,
+            ...(index === undefined ? {} : { index }),
+            text,
+            prompt,
+            seconds: typeof seconds === 'number' && seconds > 0 ? seconds : 4,
+          })
+        }
+
+        const assets: AssetRecord[] = []
+        const replaceSections = new Set(items.map((item) => item.sectionId))
+        const replaceShots = new Set(items.map((item) => item.sectionId + '#' + (item.index ?? 0)))
+        const artifactName = kind === 'voice' ? 'asset_manifest_audio' : 'asset_manifest_shots'
+        const stage = kind === 'voice' ? 'assets_audio' : 'assets_shots'
+        const existing = await machine.readArtifact<AssetManifest>(layout, artifactName)
+        const retained = (existing?.assets ?? []).filter((asset) => {
+          if (kind === 'voice') return !replaceSections.has(asset.scene_id)
+          return !replaceShots.has(asset.scene_id + '#' + (asset.shot_index ?? 0))
+        })
+
+        for (const item of items) {
+          try {
+            const file = kind === 'voice'
+              ? await generateVoice(layout, config.generation, {
+                  text: item.text,
+                  voice: typeof input.voice === 'string' ? input.voice.trim() : marker.voice,
+                  ...(typeof input.language === 'string' ? { language: input.language } : {}),
+                  ...(referencePaths.length === 0 ? {} : { referencePaths }),
+                })
+              : mode === 'video'
+                ? await generateVideo(layout, config.generation, {
+                    prompt: item.prompt,
+                    width,
+                    height,
+                    seconds: item.seconds,
+                    ...(visualReferences === undefined ? {} : { references: visualReferences }),
+                  })
+                : await generateImage(layout, config.generation, { prompt: item.prompt, width, height, ...(visualReferences === undefined ? {} : { references: visualReferences }) })
+
+            assets.push({
+              id: 'api-' + randomUUID(),
+              type: kind === 'voice' ? 'narration' : mode,
+              path: file.path,
+              source_tool: 'model_api',
+              scene_id: item.sectionId,
+              ...(kind === 'visual' && item.prompt !== '' ? { prompt: item.prompt } : {}),
+              ...(item.index === undefined ? {} : { shot_index: item.index }),
+              ...(kind === 'visual' ? {
+                resolution: width + 'x' + height,
+                format: file.format,
+                model: (mode === 'video' ? config.generation.api.video : config.generation.api.image).model,
+              } : {}),
+            })
+            const manifest: AssetManifest = { version: '1.0', assets: [...retained, ...assets] }
+            await machine.write({
+              projectId: project,
+              stage,
+              status: 'in_progress',
+              artifacts: { [artifactName]: manifest },
+              humanApproved: false,
+              note: '由模型 API 生成并记录',
+            })
+          } catch (error) {
+            if (assets.length > 0) {
+              const manifest: AssetManifest = { version: '1.0', assets: [...retained, ...assets] }
+              await machine.write({
+                projectId: project,
+                stage,
+                status: 'in_progress',
+                artifacts: { [artifactName]: manifest },
+                humanApproved: false,
+                note: 'API 批次部分完成，生成失败',
+              }).catch(() => {})
+            }
+            throw error
+          }
+        }
+
+        sendJson(response, 200, {
+          accepted: assets.length,
+          assets: assets.map((asset) => ({ id: asset.id, path: asset.path, type: asset.type })),
+        })
       } catch (error) {
         fail(response, error)
       }

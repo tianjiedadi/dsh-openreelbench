@@ -25,6 +25,7 @@ import { join } from 'node:path'
 import { promises as fs } from 'node:fs'
 
 import type { Config } from './config.js'
+import type { GenerationSize } from './generation-size.js'
 import type { AssetManifest, AssetRecord, RenderOutput, RenderReport, Script, ScriptSection } from './schema.js'
 import type { Playbook } from './playbooks.js'
 import type { Cut, CutSection } from './cuts.js'
@@ -533,6 +534,8 @@ export interface ComposeOptions {
    * or `generic` leaves it to the configured default.
    */
   targetPlatform?: string | undefined
+  /** API projects can make the saved generation dimensions the final frame too. */
+  outputFrame?: GenerationSize | undefined
   /**
    * Bake the subtitles into the picture for this render. Defaults to the
    * configured setting; the compose screen overrides it per export.
@@ -615,8 +618,16 @@ export async function renderProject(options: ComposeOptions): Promise<ComposeRes
   // Settings no longer carry a width and a height — the platform's baseline
   // times `renderScale` is the whole answer — so the resolved pair is spliced
   // in here and the local type says so.
-  const profile = resolveVideoProfile(
+  const platformProfile = resolveVideoProfile(
     options.targetPlatform, options.config.video.renderScale, options.config.video.fps)
+  const profile = options.outputFrame === undefined ? platformProfile : {
+    ...platformProfile,
+    width: options.outputFrame.width,
+    height: options.outputFrame.height,
+    source: 'default' as const,
+    shape: '自定义 ' + options.outputFrame.width + '×' + options.outputFrame.height,
+    label: '自定义 ' + options.outputFrame.width + '×' + options.outputFrame.height,
+  }
   const config: RenderConfig = {
     ...options.config,
     video: { ...options.config.video, width: profile.width, height: profile.height, fps: profile.fps },

@@ -2,7 +2,7 @@
  * dsh-openreelbench browser half.
  *
  * Today it contributes one surface: a standalone Settings page. It exists as a
- * separate plugin face because `installSettingsSection` on the host registers a
+ * separate plugin face because the host exposes `.volatile()` fields through
  * namespace and persists its values but renders nothing — the Settings sidebar
  * enumerates `settings.section` entries and mounts the active one in the
  * content column, so a page only appears for a plugin that ships a browser
@@ -52,19 +52,19 @@ import { Workbench } from './workbench.tsx'
 export const name = 'dsh-openreelbench'
 
 /**
- * `settingsScope` comes from `@deepseek-ai/dsh-client-ui-settings` and backs the
+ * `configForms` comes from `@deepseek-ai/dsh-client-ui-settings` and backs the
  * settings page; `conversation` is how OpenReel 创意台 hands a submitted gate back to
  * the model. Both are hard requirements of the surfaces registered below, so
  * unlike the host's optional `skills` they are injected rather than probed.
  */
-export const inject = ['slots', 'settingsScope', 'sessions']
+export const inject = ['slots', 'configForms', 'sessions']
 
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => injectStyles(), 'dsh-openreelbench: styles')
   ctx.effect(() => injectWorkbenchStyles(), 'dsh-openreelbench: workbench styles')
 
   // Bound on this fiber, so the scope's disposer unwinds with the plugin.
-  const scope = ctx.settingsScope.bind<Config>({ namespace: OPENREEL_NAMESPACE })
+  const scope = ctx.configForms.get<Config>(OPENREEL_NAMESPACE)
 
   /*
    * The panel's language, pushed into one module-level store.
@@ -101,6 +101,7 @@ export function apply(ctx: ClientContext): void {
       // obvious routes (root `conversation`, scoped `.conversation`) both fail.
       inject: (sessionId: string) => ({
         sessionId,
+        settingsScope: scope,
         send: async (text: string): Promise<void> => {
           const session = ctx.sessions.binding(sessionId)?.session
           if (session === undefined) {

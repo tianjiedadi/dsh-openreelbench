@@ -2,13 +2,12 @@
  * The browser half's handle on the `openreel` settings namespace.
  *
  * Everything here is structural. The scope arrives on the client context as
- * `ctx.settingsScope` — a service, not an import — so this bundle never pulls a
+ * `ctx.configForms` — a service, not an import — so this bundle never pulls a
  * platform module in as a value and stays loadable from the plugin table.
  *
- * The host registers the namespace through `installSettingsSection`; this file
- * is the other end of that same seam. Neither side knows about the other beyond
- * the namespace string, which is what lets a plugin distributed outside the
- * harness contribute a Settings page (a `settings.section` nav entry) at all.
+ * The host exposes the namespace through the dsh 0.2 settings service; this
+ * file is the browser end of that same contract. Neither side knows about the
+ * other beyond the namespace string.
  */
 import { useSyncExternalStore } from 'react'
 
@@ -32,14 +31,20 @@ export interface ScopeSnapshot<T> {
 export interface SettingsScope<T> {
   getSnapshot(): ScopeSnapshot<T>
   subscribe(listener: () => void): () => void
+  /** Atomic path writes preserve secrets omitted from the wire snapshot. */
+  mutate(ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<boolean>
   /** Queue one top-level field write. */
-  set(field: string, value: unknown): Promise<void>
+  set(field: string, value: unknown): Promise<boolean>
   /** Queue one top-level field clear, re-inheriting the composition layer. */
-  unset(field: string): Promise<void>
+  unset(field: string): Promise<boolean>
 }
 
-export interface SettingsScopeBinder {
-  bind<T>(spec: { namespace: string; decode?: (section: unknown) => T | undefined }): SettingsScope<T>
+export type SettingsPathOp =
+  | { op: 'set'; path: readonly string[]; value: unknown }
+  | { op: 'unset'; path: readonly string[] }
+
+export interface ConfigFormsService {
+  get<T>(namespace: string): SettingsScope<T>
 }
 
 /**
@@ -94,7 +99,7 @@ export interface ClientContext {
     inject(slot: string, register: () => unknown): void
     register(meta: Record<string, unknown>, component: unknown): unknown
   }
-  settingsScope: SettingsScopeBinder
+  configForms: ConfigFormsService
   sessions: SessionsService
 }
 
